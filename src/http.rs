@@ -225,92 +225,9 @@ impl Drop for Request {
     }
 }
 
-/*
-async fn fun(req: Arc<Request>) {
-    let r1 = req.receive(0, 4096).await;
-    println!("receive {} {} {}", r1.err, r1.more, r1.size);
-
-    let id = r1.as_ref().Base.RequestId;
-    let r2 = req.receive_data(id, 4096).await;
-    println!("receive_data {} {} {}", r2.err, r2.more, r2.size);
-}
-
-fn sandbox() -> Result<(), WinError> {
-    let session = Session::create(Some("test-v4"))?;
-    session.listen("http://localhost:9480/")?;
-
-    let session2 = Session::open("test-v4")?;
-    let req = Arc::new(session2.request()?);
-    tasks().spawn_ok(fun(req.clone()));
-
-    unsafe { Sleep(300000); }
-    drop(session);
-    drop(session2);
-
-    Ok(())
-}
-
-pub fn ____test() {
-    std::thread::spawn(move || {
-        if let Err(err) = sandbox() {
-            println!("{}", err);      
-        }
-    });
-}*/
-
 use neon::prelude::*;
 use super::support::*;
-// use neon::types::buffer::TypedArray;
-
-/*
-async fn fill(tx: Channel, root_cb: Root<JsFunction>, root_buf: Root<JsBuffer>) {
-    if let Ok(session) = Session::open("test-v4") {
-        if let Ok(req) = session.request() {
-            let r1 = req.receive(0, 4096).await;
-            let id = r1.as_ref().Base.RequestId;
-            let r2 = req.receive_data(id, 4096).await;
-            println!("--- r2 {}", r2.err);
-
-            tx.send(move |mut cx| {
-                let cb = root_cb.into_inner(&mut cx);
-                let mut buf = root_buf.into_inner(&mut cx);
-
-                unsafe {
-                    let data = buf.as_mut_slice(&mut cx);
-                    copy(r2.as_ptr(), &mut data[0], r2.size as usize);
-                }
-
-                cb.call_with(&mut cx).arg(buf).exec(&mut cx)?;
-
-                Ok(())
-            });
-        }
-    }
-}
-
-fn sandbox() -> Result<(), WinError> {
-    let session = Session::create(Some("test-v4"))?;
-    session.listen("http://localhost:9480/")?;
-
-    unsafe { Sleep(300000); }
-    drop(session);
-
-    Ok(())
-}
-
-pub fn __test(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    std::thread::spawn(move || {
-        if let Err(err) = sandbox() {
-            println!("{}", err);
-        }
-    });
-
-    let cb = cx.argument::<JsFunction>(0)?;
-    let buf = cx.buffer(4096)?;
-    tasks().spawn_ok(fill(cx.channel(), cb.root(&mut cx), buf.root(&mut cx)));
-    
-    return Ok(cx.undefined());
-}*/
+use neon::types::buffer::TypedArray;
 
 fn http_session_create(mut cx: FunctionContext) -> JsArcResult<Session> {
     let name: String;
@@ -419,13 +336,12 @@ fn http_request_receive_data(mut cx: FunctionContext) -> JsResult<JsPromise> {
     if let Some(arg) = opt_arg_at::<JsNumber>(&mut cx, 2)? {
         size = arg.value(&mut cx) as u32;
     }
-    
+
     let tx = cx.channel();
     let (def, promise) = cx.promise();
     let func = async move {
         let result = arc.receive_data(id, size).await;
         def.settle_with(&tx, move |mut cx| {
-            let info = &result.as_ref().Base;
             let obj = cx.empty_object();
             let js_err = cx.number(result.err);
             obj.set(&mut cx, "code", js_err)?;
@@ -437,9 +353,16 @@ fn http_request_receive_data(mut cx: FunctionContext) -> JsResult<JsPromise> {
                 return Ok(obj);
             }
 
-            let js_id = cx.boxed(info.RequestId);
-            obj.set(&mut cx, "id", js_id)?;
+            let js_size = cx.number(result.size);
+            obj.set(&mut cx, "size", js_size)?;
 
+            let mut js_data = cx.array_buffer(result.size as usize)?;
+            obj.set(&mut cx, "data", js_data)?;
+
+            unsafe {
+                let slice = (*js_data).as_mut_slice(&mut cx);
+                copy(result.as_ptr(), &mut slice[0], result.size as usize);
+            }
 
             Ok(obj)
         });

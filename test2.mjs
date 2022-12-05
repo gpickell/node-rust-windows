@@ -61,6 +61,10 @@ class Request {
     async receive(id, size) {
         return svc.http_request_receive(this.ref, id, size);
     }
+
+    async receiveData(id, size) {
+        return svc.http_request_receive_data(this.ref, id, size);
+    }
 }
 
 copyFileSync("target/release/hello_world.dll", "test.node");
@@ -80,6 +84,9 @@ async function receive_it() {
     const req = await queue.request();
     const header = await req.receive();
     console.log("--- js receive", header);
+
+    const data = await req.receiveData(header.id, 2);
+    console.log("--- js receive data", data);
 }
 
 receive_it();
