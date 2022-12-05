@@ -10,6 +10,7 @@ use std::ffi::OsString;
 use std::os::windows::ffi::OsStrExt;
 use std::fmt;
 use std::pin::Pin;
+use std::ptr::null_mut;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
@@ -146,11 +147,62 @@ unsafe impl Send for OverlappedHelper {
     
 }
 
+pub enum Buffer {
+    Auto(u32),
+    Slice(*mut u8, u32),
+    Vector(Vec<u8>),
+}
+
+use Buffer::*;
+
+impl<'a> Buffer {
+    pub fn as_ptr(&self) -> *const u8 {
+        match self {
+            Auto(_) => null_mut(),
+            Slice(ptr, _) => *ptr,
+            Vector(vec) => vec.as_ptr()
+        }
+    }
+
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+        match self {
+            Auto(_) => null_mut(),
+            Slice(ptr, _) => *ptr,
+            Vector(vec) => vec.as_mut_ptr()
+        }
+    }
+
+    pub fn capacity(&self) -> u32 {
+        match self {
+            Auto(_) => 0,
+            Slice(_, capacity) => *capacity,
+            Vector(vec) => vec.capacity() as u32,
+        }
+    }
+
+    pub fn alloc(self, min: u32) -> Self {
+        if let Buffer::Auto(hint) = self {
+            let size = match hint > min { true => hint, false => min };
+            return Vector(Vec::<u8>::with_capacity(size as usize));
+        }
+
+        if self.capacity() < min {
+            return Vector(Vec::<u8>::with_capacity(min as usize));
+        }
+
+        self
+    }
+}
+
+unsafe impl Send for Buffer {
+
+}
+
 pub struct OverlappedResult<T> {
     pub err: u32,
     pub more: bool,
     pub size: u32,
-    pub data: Vec<u8>,
+    pub data: Buffer,
     pub data_ptr: *const T
 }
 
@@ -158,9 +210,9 @@ unsafe impl<T> Send for OverlappedResult<T> {
     
 }
 
-impl<T> OverlappedResult<T> {
-    pub  fn new(size: u32) -> Self {
-        let data = Vec::<u8>::with_capacity(size as usize);
+impl<'a, T> OverlappedResult<T> {
+    pub fn new(target: Buffer, min: u32) -> Self {
+        let data = target.alloc(min);
         let data_ptr = data.as_ptr() as *const T;
         Self {
             err: 0,
@@ -183,6 +235,10 @@ impl<T> OverlappedResult<T> {
 
     pub fn as_mut_ptr(&mut self) -> *mut T {
         self.data.as_mut_ptr() as *mut T
+    }
+
+    pub fn capacity(&self) -> u32 {
+        self.data.capacity()
     }
 
     pub fn complete(&mut self, h: HANDLE, o: *mut OVERLAPPED) {

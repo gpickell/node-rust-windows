@@ -1,6 +1,7 @@
 use super::win32::*;
 
 use windows::core::PCWSTR;
+
 use windows::Win32::System::IO::*;
 use windows::Win32::System::Threading::*;
 use windows::Win32::Foundation::*;
@@ -14,34 +15,10 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
 
 #[allow(non_upper_case_globals)]
-static ver: HTTPAPI_VERSION = HTTPAPI_VERSION {
+static ver_init: HTTPAPI_VERSION = HTTPAPI_VERSION {
     HttpApiMajorVersion: 2,
     HttpApiMinorVersion: 0,
 };
-
-#[allow(dead_code)]
-enum HttpServerProperty {
-    HttpServerAuthenticationProperty,
-    HttpServerLoggingProperty,
-    HttpServerQosProperty,
-    HttpServerTimeoutsProperty,
-    HttpServerQueueLengthProperty,
-    HttpServerStateProperty,
-    HttpServer503VerbosityProperty,
-    HttpServerBindingProperty,
-    HttpServerExtendedAuthenticationProperty,
-    HttpServerListenEndpointProperty,
-    HttpServerChannelBindProperty,
-    HttpServerProtectionLevelProperty,
-    HttpServerDelegationProperty = 16,
-}
-
-#[allow(dead_code)]
-enum CreateRequestQueueFlags {
-    OpenExisting = 1,
-    Controller = 2,
-    Delegation = 8,
-}
 
 struct Session {
     active: AtomicBool,
@@ -60,19 +37,19 @@ impl Session {
             let name_wide;
             if let Some(str) = name {
                 controller = true;
-                flags = CreateRequestQueueFlags::Controller as u32;
+                flags = HTTP_CREATE_REQUEST_QUEUE_FLAG_CONTROLLER;
                 name_wide = wide(str);
                 name_ptr = wide_ptr(&name_wide);
             }
 
             let mut err: u32;
-            err = HttpInitialize(ver, HTTP_INITIALIZE(1), None);
+            err = HttpInitialize(ver_init, HTTP_INITIALIZE_SERVER, None);
             if err != 0 {
                 return Err(WinError("HttpInitialize", err));
             }
 
             let mut session: u64 = 0;
-            err = HttpCreateServerSession(ver, &mut session, 0);
+            err = HttpCreateServerSession(ver_init, &mut session, 0);
             if err != 0 {
                 return Err(WinError("HttpCreateServerSession", err));
             }
@@ -85,14 +62,14 @@ impl Session {
             }
 
             let mut queue = HANDLE(-1);
-            err = HttpCreateRequestQueue(ver, name_ptr, null_mut(), flags, &mut queue);
+            err = HttpCreateRequestQueue(ver_init, name_ptr, null_mut(), flags, &mut queue);
             if err != 0 {
                 HttpCloseServerSession(session);
                 HttpCloseUrlGroup(urls);
                 return Err(WinError("HttpCreateRequestQueue", err));
             }
 
-            let prop = HttpServerProperty::HttpServerBindingProperty;
+            let prop = HttpServerBindingProperty;
             let info = HTTP_BINDING_INFO {
                 Flags: HTTP_PROPERTY_FLAGS {
                     _bitfield: 1
@@ -101,7 +78,7 @@ impl Session {
             };
 
             let size = mem::size_of::<HTTP_BINDING_INFO>() as u32;
-            err = HttpSetUrlGroupProperty(urls, HTTP_SERVER_PROPERTY(prop as i32), &info as *const HTTP_BINDING_INFO as *const c_void, size);
+            err = HttpSetUrlGroupProperty(urls, prop, &info as *const HTTP_BINDING_INFO as *const c_void, size);
             if err != 0 {
                 HttpCloseUrlGroup(urls);
                 HttpCloseServerSession(session);
@@ -115,18 +92,18 @@ impl Session {
 
     pub fn open(name: &str) -> Result<Session, WinError> {
         unsafe {
-            let flags = CreateRequestQueueFlags::OpenExisting as u32;
+            let flags = HTTP_CREATE_REQUEST_QUEUE_FLAG_OPEN_EXISTING;
             let name_wide = wide(name);
             let name_ptr = wide_ptr(&name_wide);
 
             let mut err: u32;
-            err = HttpInitialize(ver, HTTP_INITIALIZE(1), None);
+            err = HttpInitialize(ver_init, HTTP_INITIALIZE(1), None);
             if err != 0 {
                 return Err(WinError("HttpInitialize", err));
             }
 
             let mut queue = HANDLE(-1);
-            err = HttpCreateRequestQueue(ver, name_ptr, null_mut(), flags, &mut queue);
+            err = HttpCreateRequestQueue(ver_init, name_ptr, null_mut(), flags, &mut queue);
             if err != 0 {
                 return Err(WinError("HttpCreateRequestQueue", err));
             }
@@ -187,25 +164,25 @@ struct Request {
 }
 
 impl Request {
-    pub async fn receive(&self, id: u64, size: u32) -> OverlappedResult<HTTP_REQUEST_V2> {
+    pub async fn receive(&self, id: u64, target: Buffer) -> OverlappedResult<HTTP_REQUEST_V2> {
         unsafe {
             let arc = self.arc.clone();
             let mut helper = OverlappedHelper::new();
-            let mut result = OverlappedResult::<HTTP_REQUEST_V2>::new(size);
+            let mut result = OverlappedResult::<HTTP_REQUEST_V2>::new(target, 4096);
             let flags = HTTP_RECEIVE_HTTP_REQUEST_FLAGS(0);
-            let err = HttpReceiveHttpRequest(arc.0, id, flags, result.as_mut_ptr(), size, None, helper.as_mut_ptr());
+            let err = HttpReceiveHttpRequest(arc.0, id, flags, result.as_mut_ptr(), result.capacity(), None, helper.as_mut_ptr());
             result.finish(arc.0, err, &mut helper).await;
 
             result
         }
     }
 
-    pub async fn receive_data(&self, id: u64, size: u32) -> OverlappedResult<u8> {
+    pub async fn receive_data(&self, id: u64, target: Buffer) -> OverlappedResult<u8> {
         unsafe {
             let arc = self.arc.clone();
             let mut helper = OverlappedHelper::new();
-            let mut result = OverlappedResult::<u8>::new(size);
-            let err = HttpReceiveRequestEntityBody(arc.0, id, 0, result.as_mut_ptr() as *mut c_void, size, None, helper.as_mut_ptr());
+            let mut result = OverlappedResult::<u8>::new(target, 256);
+            let err = HttpReceiveRequestEntityBody(arc.0, id, 0, result.as_mut_ptr() as *mut c_void, result.capacity(), None, helper.as_mut_ptr());
             result.finish(arc.0, err, &mut helper).await;
 
             result
@@ -224,6 +201,8 @@ impl Drop for Request {
         self.close();
     }
 }
+
+use Buffer::*;
 
 use neon::prelude::*;
 use super::support::*;
@@ -297,7 +276,7 @@ fn http_request_receive(mut cx: FunctionContext) -> JsResult<JsPromise> {
     let tx = cx.channel();
     let (def, promise) = cx.promise();
     let func = async move {
-        let result = arc.receive(id, size).await;
+        let result = arc.receive(id, Auto(size)).await;
         def.settle_with(&tx, move |mut cx| {
             let info = &result.as_ref().Base;
             let obj = cx.empty_object();
@@ -321,6 +300,56 @@ fn http_request_receive(mut cx: FunctionContext) -> JsResult<JsPromise> {
             let js_verb = cx.number(info.Verb.0);
             obj.set(&mut cx, "verb", js_verb)?;
 
+            let ver = &info.Version;
+            let version_str = format!("{}.{}", ver.MajorVersion, ver.MinorVersion);
+            let js_version = cx.string(version_str);
+            obj.set(&mut cx, "verb", js_version)?;
+            
+            unsafe {
+                if info.UnknownVerbLength > 0 {
+                    if let Ok(value) = info.pUnknownVerb.to_string() {
+                        let js_custom_verb = cx.string(value);
+                        obj.set(&mut cx, "customVerb", js_custom_verb)?;            
+                    }
+                }
+
+                if info.RawUrlLength > 0 {
+                    if let Ok(value) = info.pRawUrl.to_string() {
+                        let js_url = cx.string(value);
+                        obj.set(&mut cx, "url", js_url)?;            
+                    }
+                }
+
+                let known = &info.Headers.KnownHeaders;
+                for i in 0..known.len() {
+                    let header = &known[i];
+                    if header.RawValueLength > 0 {
+                        if let Ok(value) = header.pRawValue.to_string() {
+                            let key = format!("k_{}", i);
+                            let js_value = cx.string(value);
+                            obj.set(&mut cx, key.as_str(), js_value)?;
+                        }
+                    }
+                }
+                
+                let mut next = info.Headers.pUnknownHeaders;
+                let last = next.add(info.Headers.UnknownHeaderCount as usize);
+                while next < last {
+                    let header = &*next;
+                    next = next.add(1);
+
+                    if header.NameLength > 0 && header.RawValueLength > 0 {
+                        if let Ok(key) = header.pName.to_string() {
+                            if let Ok(value) = header.pRawValue.to_string() {
+                                let js_key = format!("u_{}", key);
+                                let js_value = cx.string(value);
+                                obj.set(&mut cx, js_key.as_str(), js_value)?;
+                            }
+                        }
+                    }
+                }                
+            }
+
             Ok(obj)
         });
     };
@@ -338,9 +367,13 @@ fn http_request_receive_data(mut cx: FunctionContext) -> JsResult<JsPromise> {
     }
 
     let tx = cx.channel();
+    let mut data = cx.array_buffer(size as usize)?;
+    let root = data.root(&mut cx);
+    let slice = data.as_mut_slice(&mut cx);
+    let target = Slice(&mut slice[0], slice.len() as u32);
     let (def, promise) = cx.promise();
     let func = async move {
-        let result = arc.receive_data(id, size).await;
+        let result = arc.receive_data(id, target).await;
         def.settle_with(&tx, move |mut cx| {
             let obj = cx.empty_object();
             let js_err = cx.number(result.err);
@@ -356,11 +389,18 @@ fn http_request_receive_data(mut cx: FunctionContext) -> JsResult<JsPromise> {
             let js_size = cx.number(result.size);
             obj.set(&mut cx, "size", js_size)?;
 
+            let js_data = root.to_inner(&mut cx);
+            let slice = js_data.as_slice(&mut cx);
+            if &slice[0] as *const u8 == result.as_ptr() {
+                obj.set(&mut cx, "data", js_data)?;
+                return Ok(obj);
+            }
+
             let mut js_data = cx.array_buffer(result.size as usize)?;
             obj.set(&mut cx, "data", js_data)?;
 
             unsafe {
-                let slice = (*js_data).as_mut_slice(&mut cx);
+                let slice = js_data.as_mut_slice(&mut cx);
                 copy(result.as_ptr(), &mut slice[0], result.size as usize);
             }
 

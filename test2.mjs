@@ -85,7 +85,7 @@ async function receive_it() {
     const header = await req.receive();
     console.log("--- js receive", header);
 
-    const data = await req.receiveData(header.id, 2);
+    const data = await req.receiveData(header.id);
     console.log("--- js receive data", data);
 }
 
@@ -95,7 +95,10 @@ async function try_it() {
     await new Promise(x => setTimeout(x, 300));
 
     let req = http.request("http://localhost:9480/", { 
-        method: "POST"
+        method: "POST",
+        headers: {
+            "X-Test-Header": "test-value"
+        }
     });
 
     req.on("error", () => {});
