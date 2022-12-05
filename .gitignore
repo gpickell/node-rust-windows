@@ -1,0 +1,10 @@
+*
+!*.md
+!*.mjs
+!*.rs
+!*.xml
+!Cargo.*
+!src
+!src/**
+.*
+!.gitignore
