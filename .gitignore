@@ -1,6 +1,5 @@
 dist
 target
-.yarn
-!.yarn/plugins
-!.yarn/releases
-!.yarn/sdks
+.yarn/cache
+.yarn/unplugged
+.yarn/install-state.gz
