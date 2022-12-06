@@ -1,10 +1,6 @@
-*
-!*.md
-!*.mjs
-!*.rs
-!*.xml
-!Cargo.*
-!src
-!src/**
-.*
-!.gitignore
+dist
+target
+.yarn
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks

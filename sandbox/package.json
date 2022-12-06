@@ -1,0 +1,8 @@
+{
+    "type": "module",
+    "license": "MIT",
+    "dependencies": {
+        "@tsereact/node-rust-windows-native-api": "workspace:",
+        "@tsereact/node-rust-windows-native-bridge": "workspace:"
+    }
+}

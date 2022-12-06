@@ -12,7 +12,6 @@ use std::ffi::*;
 use std::mem;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering::Relaxed;
 
 #[allow(non_upper_case_globals)]
@@ -163,7 +162,6 @@ impl Drop for Session {
 struct Request {
     arc: Arc<HandleRef>,
     cancel_all: AtomicBool,
-    flags: AtomicU32,
 }
 
 impl Request {
@@ -171,7 +169,6 @@ impl Request {
         Self {
             arc: HandleRef::new(h),
             cancel_all: AtomicBool::new(false),
-            flags: AtomicU32::new(0)
         }
     }
 
@@ -476,31 +473,6 @@ fn http_request_receive_data(mut cx: FunctionContext) -> JsResult<JsPromise> {
     Ok(promise)
 }
 
-fn http_request_flags(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let arc = JsArc::<Request>::import(&mut cx, 0)?;
-    let mut flags = arc.flags.load(Relaxed);
-    if let Some(flag) = opt_arg_at::<JsBoolean>(&mut cx, 1)? {
-        let value = HTTP_SEND_RESPONSE_FLAG_MORE_DATA;
-        flags |= value;
-
-        if !flag.value(&mut cx) {
-            flags ^= value; 
-        }
-    }
-
-    if let Some(flag) = opt_arg_at::<JsBoolean>(&mut cx, 2)? {
-        let value = HTTP_SEND_RESPONSE_FLAG_OPAQUE;
-        flags |= value;
-
-        if !flag.value(&mut cx) {
-            flags ^= value; 
-        }
-    }
-
-    arc.flags.store(flags, Relaxed);
-    Ok(cx.undefined())
-}
-
 fn http_request_close(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let arc = JsArc::<Request>::import(&mut cx, 0)?;
     arc.close();
@@ -516,9 +488,7 @@ pub fn http_bind(cx: &mut ModuleContext) -> NeonResult<()> {
     cx.export_function("http_session_request", http_session_request)?;
     cx.export_function("http_session_close", http_session_close)?;
 
-    cx.export_function("http_request_flags", http_request_flags)?;
     cx.export_function("http_request_close", http_request_close)?;
-
     cx.export_function("http_request_cancel", http_request_cancel)?;
     cx.export_function("http_request_receive", http_request_receive)?;
     cx.export_function("http_request_receive_data", http_request_receive_data)?;

@@ -1,0 +1,15 @@
+{
+    "type": "module",
+    "license": "MIT",
+    "packageManager": "yarn@3.3.0",
+    "workspaces": [
+        "packages/*",
+        "sandbox"
+    ],
+    "devDependencies": {
+        "typescript": "^4.9.3"
+    },
+    "scripts": {
+        "build:all": "yarn workspaces foreach -t run build"
+    }
+}
