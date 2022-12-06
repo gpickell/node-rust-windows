@@ -12,6 +12,7 @@ use std::ffi::*;
 use std::mem;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering::Relaxed;
 
 #[allow(non_upper_case_globals)]
@@ -138,7 +139,7 @@ impl Session {
                 return Err(WinError("BindIoCompletionCallback", GetLastError().0));
             }
 
-            Ok(Request { arc: HandleRef::new(queue) })
+            Ok(Request::new(queue))
         }
     }
     
@@ -161,16 +162,48 @@ impl Drop for Session {
 
 struct Request {
     arc: Arc<HandleRef>,
+    cancel_all: AtomicBool,
+    flags: AtomicU32,
 }
 
 impl Request {
+    pub fn new(h: HANDLE) -> Self {
+        Self {
+            arc: HandleRef::new(h),
+            cancel_all: AtomicBool::new(false),
+            flags: AtomicU32::new(0)
+        }
+    }
+
+    unsafe fn cancel_io_maybe(&self, h: HANDLE) {
+        if self.cancel_all.load(Relaxed) {
+            CancelIo(h);
+        }
+    }
+
+    pub async fn cancel(&self, id: u64) -> OverlappedResult<()> {
+        unsafe {
+            let arc = self.arc.clone();
+            let mut helper = OverlappedHelper::new();
+            let mut result = OverlappedResult::<()>::new(Auto(0), 0);
+            let err = HttpCancelHttpRequest(arc.0, id, helper.as_mut_ptr());
+
+            self.cancel_io_maybe(arc.0);
+            result.finish(arc.0, err, &mut helper).await;
+
+            result
+        }
+    }
+
     pub async fn receive(&self, id: u64, target: Buffer) -> OverlappedResult<HTTP_REQUEST_V2> {
         unsafe {
             let arc = self.arc.clone();
             let mut helper = OverlappedHelper::new();
-            let mut result = OverlappedResult::<HTTP_REQUEST_V2>::new(target, 4096);
+            let mut result = OverlappedResult::<HTTP_REQUEST_V2>::new(target, 1024);
             let flags = HTTP_RECEIVE_HTTP_REQUEST_FLAGS(0);
             let err = HttpReceiveHttpRequest(arc.0, id, flags, result.as_mut_ptr(), result.capacity(), None, helper.as_mut_ptr());
+
+            self.cancel_io_maybe(arc.0);
             result.finish(arc.0, err, &mut helper).await;
 
             result
@@ -183,6 +216,8 @@ impl Request {
             let mut helper = OverlappedHelper::new();
             let mut result = OverlappedResult::<u8>::new(target, 256);
             let err = HttpReceiveRequestEntityBody(arc.0, id, 0, result.as_mut_ptr() as *mut c_void, result.capacity(), None, helper.as_mut_ptr());
+
+            self.cancel_io_maybe(arc.0);
             result.finish(arc.0, err, &mut helper).await;
 
             result
@@ -190,6 +225,8 @@ impl Request {
     }
 
     pub fn close(&self) {
+        self.cancel_all.store(true, Relaxed);
+
         unsafe {
             CancelIo(self.arc.0);
         }
@@ -261,41 +298,55 @@ fn http_session_request(mut cx: FunctionContext) -> JsArcResult<Request> {
     } 
 }
 
-fn http_request_receive(mut cx: FunctionContext) -> JsResult<JsPromise> {
-    let mut id = 0u64;
-    let mut size = 4096u32;
+fn http_request_cancel(mut cx: FunctionContext) -> JsResult<JsPromise> {
     let arc = JsArc::<Request>::import(&mut cx, 0)?;
-    if let Some(arg) = opt_arg_at::<JsBox<u64>>(&mut cx, 1)? {
-        id = **arg;
-    }
-
-    if let Some(arg) = opt_arg_at::<JsNumber>(&mut cx, 2)? {
-        size = arg.value(&mut cx) as u32;
-    }
-    
+    let id = **cx.argument::<JsBox<u64>>(1)?;
     let tx = cx.channel();
     let (def, promise) = cx.promise();
     let func = async move {
-        let result = arc.receive(id, Auto(size)).await;
+        let result = arc.cancel(id).await;
+        def.settle_with(&tx, move |mut cx| {
+            let obj = cx.empty_object();
+            let js_err = cx.number(result.err);
+            obj.set(&mut cx, "code", js_err)?;
+
+            Ok(obj)
+        });  
+    };
+    
+    tasks().spawn_ok(func);
+    Ok(promise)
+}
+
+fn http_request_receive(mut cx: FunctionContext) -> JsResult<JsPromise> {
+    let mut size = 4096u32;
+    let arc = JsArc::<Request>::import(&mut cx, 0)?;
+    if let Some(arg) = opt_arg_at::<JsNumber>(&mut cx, 1)? {
+        size = arg.value(&mut cx) as u32;
+    }
+           
+    let tx = cx.channel();
+    let (def, promise) = cx.promise();
+    let func = async move {
+        let mut tmp = arc.receive(0, Auto(size)).await;
+        if tmp.more {
+            let id = tmp.as_ref().Base.RequestId;
+            tmp = arc.receive(id, Auto(tmp.size)).await;
+        }
+
+        let result = tmp;
         def.settle_with(&tx, move |mut cx| {
             let info = &result.as_ref().Base;
             let obj = cx.empty_object();
             let js_err = cx.number(result.err);
             obj.set(&mut cx, "code", js_err)?;
 
-            let js_more = cx.boolean(result.more);
-            obj.set(&mut cx, "more", js_more)?;
-
-            if result.err != 0 {
+            if result.err != 0 || result.more {
                 return Ok(obj);
             }
 
             let js_id = cx.boxed(info.RequestId);
             obj.set(&mut cx, "id", js_id)?;
-
-            if result.more {
-                return Ok(obj);
-            }
 
             let js_verb = cx.number(info.Verb.0);
             obj.set(&mut cx, "verb", js_verb)?;
@@ -303,8 +354,16 @@ fn http_request_receive(mut cx: FunctionContext) -> JsResult<JsPromise> {
             let ver = &info.Version;
             let version_str = format!("{}.{}", ver.MajorVersion, ver.MinorVersion);
             let js_version = cx.string(version_str);
-            obj.set(&mut cx, "verb", js_version)?;
-            
+            obj.set(&mut cx, "version", js_version)?;
+
+            let body = (info.Flags & HTTP_REQUEST_FLAG_MORE_ENTITY_BODY_EXISTS) != 0;
+            let js_body = cx.boolean(body);
+            obj.set(&mut cx, "body", js_body)?;
+
+            let http2 = (info.Flags & HTTP_REQUEST_FLAG_HTTP2) != 0;
+            let js_http2 = cx.boolean(http2);
+            obj.set(&mut cx, "http2", js_http2)?;
+           
             unsafe {
                 if info.UnknownVerbLength > 0 {
                     if let Ok(value) = info.pUnknownVerb.to_string() {
@@ -320,17 +379,23 @@ fn http_request_receive(mut cx: FunctionContext) -> JsResult<JsPromise> {
                     }
                 }
 
+                let js_known = cx.empty_array();
+                obj.set(&mut cx, "knownHeaders", js_known)?;
+
                 let known = &info.Headers.KnownHeaders;
                 for i in 0..known.len() {
                     let header = &known[i];
                     if header.RawValueLength > 0 {
                         if let Ok(value) = header.pRawValue.to_string() {
-                            let key = format!("k_{}", i);
+                            let key = format!("{}", i);
                             let js_value = cx.string(value);
-                            obj.set(&mut cx, key.as_str(), js_value)?;
+                            js_known.set(&mut cx, key.as_str(), js_value)?;
                         }
                     }
                 }
+
+                let js_unknown = cx.empty_array();
+                obj.set(&mut cx, "unknownHeaders", js_unknown)?;
                 
                 let mut next = info.Headers.pUnknownHeaders;
                 let last = next.add(info.Headers.UnknownHeaderCount as usize);
@@ -341,13 +406,12 @@ fn http_request_receive(mut cx: FunctionContext) -> JsResult<JsPromise> {
                     if header.NameLength > 0 && header.RawValueLength > 0 {
                         if let Ok(key) = header.pName.to_string() {
                             if let Ok(value) = header.pRawValue.to_string() {
-                                let js_key = format!("u_{}", key);
                                 let js_value = cx.string(value);
-                                obj.set(&mut cx, js_key.as_str(), js_value)?;
+                                js_unknown.set(&mut cx, key.as_str(), js_value)?;
                             }
                         }
                     }
-                }                
+                }
             }
 
             Ok(obj)
@@ -379,8 +443,8 @@ fn http_request_receive_data(mut cx: FunctionContext) -> JsResult<JsPromise> {
             let js_err = cx.number(result.err);
             obj.set(&mut cx, "code", js_err)?;
 
-            let js_more = cx.boolean(result.more);
-            obj.set(&mut cx, "more", js_more)?;
+            let js_eof = cx.boolean(result.err == ERROR_HANDLE_EOF.0);
+            obj.set(&mut cx, "eof", js_eof)?;
 
             if result.err != 0 {
                 return Ok(obj);
@@ -412,6 +476,38 @@ fn http_request_receive_data(mut cx: FunctionContext) -> JsResult<JsPromise> {
     Ok(promise)
 }
 
+fn http_request_flags(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+    let arc = JsArc::<Request>::import(&mut cx, 0)?;
+    let mut flags = arc.flags.load(Relaxed);
+    if let Some(flag) = opt_arg_at::<JsBoolean>(&mut cx, 1)? {
+        let value = HTTP_SEND_RESPONSE_FLAG_MORE_DATA;
+        flags |= value;
+
+        if !flag.value(&mut cx) {
+            flags ^= value; 
+        }
+    }
+
+    if let Some(flag) = opt_arg_at::<JsBoolean>(&mut cx, 2)? {
+        let value = HTTP_SEND_RESPONSE_FLAG_OPAQUE;
+        flags |= value;
+
+        if !flag.value(&mut cx) {
+            flags ^= value; 
+        }
+    }
+
+    arc.flags.store(flags, Relaxed);
+    Ok(cx.undefined())
+}
+
+fn http_request_close(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+    let arc = JsArc::<Request>::import(&mut cx, 0)?;
+    arc.close();
+
+    Ok(cx.undefined())
+}
+
 pub fn http_bind(cx: &mut ModuleContext) -> NeonResult<()> {
     cx.export_function("http_session_create", http_session_create)?;
     cx.export_function("http_session_open", http_session_open)?;
@@ -420,6 +516,10 @@ pub fn http_bind(cx: &mut ModuleContext) -> NeonResult<()> {
     cx.export_function("http_session_request", http_session_request)?;
     cx.export_function("http_session_close", http_session_close)?;
 
+    cx.export_function("http_request_flags", http_request_flags)?;
+    cx.export_function("http_request_close", http_request_close)?;
+
+    cx.export_function("http_request_cancel", http_request_cancel)?;
     cx.export_function("http_request_receive", http_request_receive)?;
     cx.export_function("http_request_receive_data", http_request_receive_data)?;
 
