@@ -1,5 +1,6 @@
 dist
 target
+*.node
 .yarn/cache
 .yarn/unplugged
 .yarn/install-state.gz

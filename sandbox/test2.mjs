@@ -17,14 +17,14 @@ process.on("exit", () => {
 
 async function receive_it() {
     const req = queue.request();
-    const header = await req.receive();
-    console.log("--- js receive", header);
+    console.log("--- receive", await req.receive());
+    console.log("--- state", req);
 
-    const data1 = await req.receiveData(header.id);
-    console.log("--- js receive data", data1);
+    console.log("--- receive data", await req.receiveData());
+    console.log("--- state", req);
 
-    const data2 = await req.receiveData(header.id);
-    console.log("--- js receive data", data2);
+    console.log("--- receive data", await req.receiveData());
+    console.log("--- state", req);
 }
 
 receive_it();

@@ -303,11 +303,7 @@ fn http_request_cancel(mut cx: FunctionContext) -> JsResult<JsPromise> {
     let func = async move {
         let result = arc.cancel(id).await;
         def.settle_with(&tx, move |mut cx| {
-            let obj = cx.empty_object();
-            let js_err = cx.number(result.err);
-            obj.set(&mut cx, "code", js_err)?;
-
-            Ok(obj)
+            Ok(cx.number(result.err))
         });  
     };
     
@@ -338,12 +334,16 @@ fn http_request_receive(mut cx: FunctionContext) -> JsResult<JsPromise> {
             let js_err = cx.number(result.err);
             obj.set(&mut cx, "code", js_err)?;
 
-            if result.err != 0 || result.more {
+            if result.err != 0 {
                 return Ok(obj);
             }
 
             let js_id = cx.boxed(info.RequestId);
             obj.set(&mut cx, "id", js_id)?;
+
+            if result.more {
+                return Ok(obj);
+            }
 
             let js_verb = cx.number(info.Verb.0);
             obj.set(&mut cx, "verb", js_verb)?;
