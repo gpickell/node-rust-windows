@@ -25,6 +25,12 @@ async function receive_it() {
 
     console.log("--- receive data", await req.receiveData());
     console.log("--- state", req);
+
+    req.response.status = 200;
+    req.response.reason = "OK";
+    req.response.addHeader("Cache-Control", "no-cache");
+    req.response.addHeader("X-Test", "test1");
+    console.log("--- send", await req.send(true));
 }
 
 receive_it();
@@ -42,7 +48,11 @@ async function try_it() {
     req.on("error", () => {});
 
     req.on("response", res => {
-        res.resume();
+        console.log("--- resposne", res.status, res.reason, res.httpVersion, res.rawHeaders);
+
+        res.setEncoding("utf-8");
+        res.on("data", x => console.log("--- data", x));
+        res.on("end", x => console.log("--- end"));
     });
     
     req.write("test");

@@ -62,18 +62,20 @@ function initMapper() {
     let responseHeadersByName = Object.create(null) as Record<string, number>;
 
     let max = 0;
+    let set = new Set();
     for (const key in responseHeaders) {
-        const id = requestHeaders[key];
-        max = Math.max(id, max)
+        const id = responseHeaders[key];
+        max = Math.max(id + 1, max)
+        set.add(id);
 
-        responseHeadersByName[key.toLowerCase()] = responseHeaders[key];
+        responseHeadersByName[key.toLowerCase()] = id;
     }
 
     for (const key in requestHeaders) {
         const id = requestHeaders[key];
         requestHeadersByIndex[id] = key;
 
-        if (id < max && responseHeadersByName[id] === undefined) {
+        if (id < max && !set.has(id)) {
             responseHeadersByName[key.toLowerCase()] = id;
         }
     }
@@ -137,16 +139,12 @@ function renderBlock(array: BlockItem[]) {
         if (typeof x === "string") {
             const index = i;
             const part = Buffer.from(x);
-            const len = part.byteLength + 1;
+            const len = part.byteLength;
             data.push(part);
             data.push(Buffer.alloc(1));
-            i += len;
+            i += len + 1;
 
             return [index, len];
-        }
-
-        if (Buffer.isBuffer(x)) {
-            return [x.buffer, x.byteOffset, x.byteLength];
         }
 
         return x;
@@ -154,7 +152,7 @@ function renderBlock(array: BlockItem[]) {
 
     const block = Buffer.concat(data);
     const result = stage.flat();
-    result.unshift(block.buffer, block.byteOffset, block.byteLength);
+    result.unshift(block);
 
     return result;
 }
@@ -229,7 +227,7 @@ export class SystemHttpRequest {
 
     close() {
         this.ref && svc.http_request_close(this.ref);
-        Object.assign(this, { ref: undefined })
+        Object.assign(this, { id: undefined, ref: undefined })
     }
 
     // @ts-ignore
@@ -310,7 +308,8 @@ export class SystemHttpRequest {
             this.opaque,
             this.writable,
             response.status,
-            Number(major), Number(minor)
+            Number(major), Number(minor),
+            response.reason,
         ];
 
         for (const [name, value] of Object.entries(response.headers)) {
@@ -323,8 +322,8 @@ export class SystemHttpRequest {
             }
         }
 
-        const result = await svc.http_request_send(this.ref, this.id, ...renderBlock(block));
-        return result.code;
+        // console.log(renderBlock(block));
+        return await svc.http_request_send(this.ref, this.id, ...renderBlock(block));
     }
 
     // @ts-ignore

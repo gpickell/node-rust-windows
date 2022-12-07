@@ -1,8 +1,10 @@
 use neon::prelude::*;
 
 use neon::handle::Managed;
+use neon::types::buffer::TypedArray;
 use neon::types::function::CallOptions;
 
+use std::ops::Range;
 use std::sync::Arc;
 use std::sync::Condvar;
 use std::sync::Mutex;
@@ -133,6 +135,21 @@ impl<T> Finalize for JsArc<T> {
 
 unsafe impl<T> Send for JsArc<T> {
 
+}
+
+pub fn arg_at<'a, T: Managed + Value>(cx: &mut FunctionContext<'a>, iter: &mut Range<i32>) -> NeonResult<Handle<'a, T>> {
+    let i = iter.next().unwrap_or(cx.len());
+    let arg = cx.argument::<T>(i)?;
+
+    return Ok(arg);
+}
+
+pub fn arg_ptr_at<'a>(cx: &mut FunctionContext<'a>, block: &Handle<'a, JsBuffer>, iter: &mut Range<i32>) -> NeonResult<(*const u8, f64)> {
+    let i = iter.next().unwrap_or(cx.len());
+    let arg = cx.argument::<JsNumber>(i)?.value(cx);
+    let slice = block.as_slice(cx);
+    let ptr: *const u8 = &slice[arg as usize];
+    return Ok((ptr, arg_at::<JsNumber>(cx, iter)?.value(cx)));
 }
 
 pub fn opt_arg_at<'a, T: Managed + Value>(cx: &mut FunctionContext<'a>, i: i32) -> NeonResult<Option<Handle<'a, T>>> {

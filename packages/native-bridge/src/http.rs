@@ -1,5 +1,6 @@
 use super::win32::*;
 
+use windows::core::PCSTR;
 use windows::core::PCWSTR;
 
 use windows::Win32::System::IO::*;
@@ -19,6 +20,12 @@ static ver_init: HTTPAPI_VERSION = HTTPAPI_VERSION {
     HttpApiMajorVersion: 2,
     HttpApiMinorVersion: 0,
 };
+
+struct SendPointer<T>(*mut T);
+
+unsafe impl<T> Send for SendPointer<T> {
+
+}
 
 struct Session {
     active: AtomicBool,
@@ -221,6 +228,20 @@ impl Request {
         }
     }
 
+    pub async fn send(&self, id: u64, flags: u32, source: SendPointer<HTTP_RESPONSE_V2>) -> OverlappedResult<u32> {
+        unsafe {
+            let arc = self.arc.clone();
+            let mut helper = OverlappedHelper::new();
+            let mut result = OverlappedResult::<u32>::new(Auto(0), 4);
+            let err = HttpSendHttpResponse(arc.0, id, flags, source.0, null_mut(), result.as_mut_ptr(), None, 0, helper.as_mut_ptr(), null_mut());
+
+            self.cancel_io_maybe(arc.0);
+            result.finish(arc.0, err, &mut helper).await;
+
+            result
+        }
+    }
+
     pub fn close(&self) {
         self.cancel_all.store(true, Relaxed);
 
@@ -304,7 +325,7 @@ fn http_request_cancel(mut cx: FunctionContext) -> JsResult<JsPromise> {
         let result = arc.cancel(id).await;
         def.settle_with(&tx, move |mut cx| {
             Ok(cx.number(result.err))
-        });  
+        });
     };
     
     tasks().spawn_ok(func);
@@ -473,6 +494,147 @@ fn http_request_receive_data(mut cx: FunctionContext) -> JsResult<JsPromise> {
     Ok(promise)
 }
 
+fn http_request_send(mut cx: FunctionContext) -> JsResult<JsPromise> {
+    let arc = JsArc::<Request>::import(&mut cx, 0)?;
+    let id = **cx.argument::<JsBox<u64>>(1)?;
+    let block = cx.argument::<JsBuffer>(2)?;
+    let root = block.root(&mut cx);
+
+    struct Transfer {
+        unknown: Vec<HTTP_UNKNOWN_HEADER>,
+        response: Box<HTTP_RESPONSE_V2>
+    }
+
+    impl Transfer {
+        fn new() -> Self {
+            let empty = HTTP_KNOWN_HEADER {
+                RawValueLength: 0,
+                pRawValue: PCSTR::null()
+            };
+
+            Self {
+                unknown: Vec::new(),
+                response: Box::new(HTTP_RESPONSE_V2 {
+                    Base: HTTP_RESPONSE_V1 {
+                        Flags: 0,
+                        Version: HTTP_VERSION {
+                            MajorVersion: 0,
+                            MinorVersion: 0,
+                        },
+                        StatusCode: 0,
+                        ReasonLength: 0,
+                        pReason: PCSTR::null(),
+                        Headers: HTTP_RESPONSE_HEADERS {
+                            UnknownHeaderCount: 0,
+                            pUnknownHeaders: null_mut(),
+                            TrailerCount: 0,
+                            pTrailers: null_mut(),
+                            KnownHeaders: [empty; 30]
+                        },
+                        EntityChunkCount: 0,
+                        pEntityChunks: null_mut(),
+                    },
+                    ResponseInfoCount: 0,
+                    pResponseInfo: null_mut(),
+                })
+            }
+        }
+
+        fn status(&mut self, status: f64, major: f64, minor: f64) {
+            let base = &mut self.response.Base;
+            base.StatusCode = status as u16;
+            base.Version = HTTP_VERSION {
+                MajorVersion: major as u16,
+                MinorVersion: minor as u16,
+            };
+        }
+
+        fn reason(&mut self, reason: &(*const u8, f64)) {
+            let base = &mut self.response.Base;
+            base.ReasonLength = reason.1 as u16;
+            base.pReason = PCSTR(reason.0);
+        }
+
+        fn add_known(&mut self, id: f64, value: &(*const u8, f64)) {
+            let base = &mut self.response.Base;
+            base.Headers.KnownHeaders[id as usize] = HTTP_KNOWN_HEADER {
+                RawValueLength: value.1 as u16,
+                pRawValue: PCSTR(value.0)
+            };
+        }
+
+        fn add_unknown(&mut self, name: &(*const u8, f64), value: &(*const u8, f64)) {
+            let vec = &mut self.unknown;
+            vec.push(HTTP_UNKNOWN_HEADER {
+                NameLength: name.1 as u16,
+                pName: PCSTR(name.0),
+                RawValueLength: value.1 as u16,
+                pRawValue: PCSTR(value.0)
+            });
+
+            let base = &mut self.response.Base;
+            base.Headers.UnknownHeaderCount = vec.len() as u16;
+            base.Headers.pUnknownHeaders = vec.as_mut_ptr();
+        }
+
+        fn source(&mut self) -> SendPointer<HTTP_RESPONSE_V2> {
+            SendPointer(self.response.as_mut())
+        }
+    }
+
+    unsafe impl Send for Transfer {
+
+    }
+
+    let mut transfer = Transfer::new();
+    let mut i = 3..cx.len();
+    let opaque = arg_at::<JsBoolean>(&mut cx, &mut i)?.value(&mut cx);
+    let more = arg_at::<JsBoolean>(&mut cx, &mut i)?.value(&mut cx);
+    let status = arg_at::<JsNumber>(&mut cx, &mut i)?.value(&mut cx);
+    let major = arg_at::<JsNumber>(&mut cx, &mut i)?.value(&mut cx);
+    let minor = arg_at::<JsNumber>(&mut cx, &mut i)?.value(&mut cx);
+    let reason = arg_ptr_at(&mut cx, &block, &mut i)?;
+    transfer.status(status, major, minor);
+    transfer.reason(&reason);
+
+    let mut flags = 0;
+    if opaque {
+        flags |= HTTP_SEND_RESPONSE_FLAG_OPAQUE;
+    }
+
+    if more {
+        flags |= HTTP_SEND_RESPONSE_FLAG_MORE_DATA;
+    }
+
+    while !i.is_empty() {
+        let id = arg_at::<JsNumber>(&mut cx, &mut i)?.value(&mut cx);
+        let value = arg_ptr_at(&mut cx, &block, &mut i)?;
+
+        if id < 0.0 {
+            let name = arg_ptr_at(&mut cx, &block, &mut i)?;
+            transfer.add_unknown(&name, &value);
+        } else {
+            transfer.add_known(id, &value);
+        }
+    }
+
+    let tx = cx.channel();
+    let source = transfer.source();
+    let (def, promise) = cx.promise();
+    let func = async move {
+        let result = arc.send(id, flags, source).await;
+        drop(root);
+        drop(transfer);
+
+        def.settle_with(&tx, move |mut cx| {
+            Ok(cx.number(result.err))
+        });
+    };
+
+    tasks().spawn_ok(func);
+    Ok(promise)
+}
+
 fn http_request_close(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let arc = JsArc::<Request>::import(&mut cx, 0)?;
     arc.close();
@@ -488,10 +650,11 @@ pub fn http_bind(cx: &mut ModuleContext) -> NeonResult<()> {
     cx.export_function("http_session_request", http_session_request)?;
     cx.export_function("http_session_close", http_session_close)?;
 
-    cx.export_function("http_request_close", http_request_close)?;
     cx.export_function("http_request_cancel", http_request_cancel)?;
     cx.export_function("http_request_receive", http_request_receive)?;
     cx.export_function("http_request_receive_data", http_request_receive_data)?;
+    cx.export_function("http_request_send", http_request_send)?;
+    cx.export_function("http_request_close", http_request_close)?;
 
     Ok(())
 }
