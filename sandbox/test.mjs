@@ -1,39 +1,37 @@
-import { createRequire } from "module";
-import { fileURLToPath } from "url";
 import { appendFileSync, writeFileSync } from "fs";
+import NodePlugin from "@tsereact/node-rust-windows-native-api/NodePlugin";
 
-const require = createRequire(fileURLToPath(import.meta.url));
-const svc = require("./test.node");
+const svc = NodePlugin.setup(import.meta.url);
 
 const fn = "d:\\test.log";
 writeFileSync(fn, `--- init ${new Date()}\n`);
 
-let ptr = svc.watch(x => {
+let ptr = svc.service_watch(x => {
     console.log("---", x);
     appendFileSync(fn, `--- ${x}\n`);
 
     if (x === "start") {
-        svc.startPending();
-        svc.running();
+        svc.service_start_pending();
+        svc.service_running();
     }
 
     if (x === "control-stop") {
-        svc.clear();
-        svc.stopPending();
+        svc.service_clear();
+        svc.service_stop_pending();
     }
 });
 
 process.on("exit", () => {
     console.log("--- exit");
     appendFileSync(fn, `--- exit\n`);
-    svc.stopped();
-    svc.shutdown();
+    svc.service_stopped();
+    svc.service_shutdown();
 });
 
 process.once("SIGINT", () => {
     console.log("--- SIGINT");
     appendFileSync(fn, `--- SIGINT\n`);
-    svc.post("control-stop");
+    svc.service_post("control-stop");
 });
 
-svc.simulate("test_service", false);
+console.log("--- start", svc.service_simulate("test_service", false));

@@ -27,6 +27,8 @@ export namespace NodePlugin {
         if (process.env[ENV_HINT] === undefined) {
             process.env[ENV_HINT] = hint;
         }
+
+        return svc;
     }
 }
 

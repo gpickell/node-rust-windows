@@ -6,7 +6,6 @@ use neon::types::function::CallOptions;
 
 use std::ops::Range;
 use std::sync::Arc;
-use std::sync::Condvar;
 use std::sync::Mutex;
 
 pub type CallbackHandle = (Channel, Arc<Root<JsFunction>>);
@@ -69,49 +68,6 @@ impl CallbackList {
                 Ok(())
             });
         }
-    }
-}
-
-pub struct Event {
-    mx: Mutex<Option<bool>>,
-    sem: Condvar,
-}
-
-impl Event {
-    pub const fn new() -> Self {
-        Self {
-            mx: Mutex::new(None),
-            sem: Condvar::new(),
-        }
-    }
-
-    pub fn set(&self, value: bool) -> bool {
-        if let Ok(mut state) = self.mx.lock() {
-            if (*state).is_some() {
-                return false;
-            }
-
-            *state = Some(value);
-        }
-
-        self.sem.notify_all();
-        return true;
-    }
-
-    pub fn wait(&self) -> bool {
-        if let Ok(state) = self.mx.lock() {
-            if let Some(result) = *state {
-                return result;
-            }
-
-            if let Ok(after) = self.sem.wait(state) {
-                if let Some(result) = *after {
-                    return result;
-                }    
-            }
-        }
-
-        return false;
     }
 }
 
