@@ -147,10 +147,19 @@ function renderBlock(array: BlockItem[]) {
             return [index, len];
         }
 
-        return x;
+        if (Buffer.isBuffer(x)) {
+            const index = i;
+            const len = x.byteLength;
+            data.push(x);
+            i += len;
+
+            return [index, len];
+        }
+
+        return x as BlockItem;
     });
 
-    const block = Buffer.concat(data);
+    const block = data.length == 1 ? data[0] : Buffer.concat(data);
     const result = stage.flat();
     result.unshift(block);
 
@@ -231,8 +240,22 @@ export class SystemHttpRequest {
     }
 
     // @ts-ignore
-    push(verb: string, url: string, headers: Record<string, string>) {
+    push(method: string, url: string, headers?: Record<string, string> | false = false) {
+        const path = url.replace(/\?.*/, "");
+        const query = url.substring(path.length + 1);
+        const block: BlockItem[] = [
+            method,
+            path,
+            path === url,
+            query,
+        ];
 
+        for (const [name, value] of Object.entries(headers)) {
+            addBlockHeader(block, name, value);
+        }
+        
+        const result = svc.http_request_push(this.ref, this.id, ...renderBlock(block));
+        return result.code;
     }
 
     async cancel(): Promise<number | undefined> {
@@ -246,7 +269,7 @@ export class SystemHttpRequest {
     async receive(size?: number) {
         const { knownHeaders, unknownHeaders, id, ...rest } = await svc.http_request_receive(this.ref, size);
         if (rest.code !== 0) {
-            return false;
+            return rest.code as number;
         }
 
         Object.assign(this, { id });
@@ -345,8 +368,8 @@ export class SystemHttpRequest {
             }
         }
 
-        const result = await svc.http_request_send_data(this.ref, this.id, ...renderBlock(block));
-        return result.code;
+        // console.log(renderBlock(block));
+        return await svc.http_request_send_data(this.ref, this.id, ...renderBlock(block));
     }
 }
 

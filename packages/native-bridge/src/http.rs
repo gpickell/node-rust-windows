@@ -21,9 +21,9 @@ static ver_init: HTTPAPI_VERSION = HTTPAPI_VERSION {
     HttpApiMinorVersion: 0,
 };
 
-struct SendPointer<T>(*mut T);
+struct SendRef<T>(T);
 
-unsafe impl<T> Send for SendPointer<T> {
+unsafe impl<T> Send for SendRef<T> {
 
 }
 
@@ -228,7 +228,7 @@ impl Request {
         }
     }
 
-    pub async fn send(&self, id: u64, flags: u32, source: SendPointer<HTTP_RESPONSE_V2>) -> OverlappedResult<u32> {
+    pub async fn send(&self, id: u64, flags: u32, source: SendRef<*mut HTTP_RESPONSE_V2>) -> OverlappedResult<u32> {
         unsafe {
             let arc = self.arc.clone();
             let mut helper = OverlappedHelper::new();
@@ -499,103 +499,69 @@ fn http_request_send(mut cx: FunctionContext) -> JsResult<JsPromise> {
     let id = **cx.argument::<JsBox<u64>>(1)?;
     let block = cx.argument::<JsBuffer>(2)?;
     let root = block.root(&mut cx);
+    let mut unknown = Vec::<HTTP_UNKNOWN_HEADER>::new();
+    let mut response = Box::<HTTP_RESPONSE_V2>::new(HTTP_RESPONSE_V2 {
+        Base: HTTP_RESPONSE_V1 {
+            Flags: 0,
+            Version: HTTP_VERSION {
+                MajorVersion: 0,
+                MinorVersion: 0,
+            },
+            StatusCode: 0,
+            ReasonLength: 0,
+            pReason: PCSTR::null(),
+            Headers: HTTP_RESPONSE_HEADERS {
+                UnknownHeaderCount: 0,
+                pUnknownHeaders: null_mut(),
+                TrailerCount: 0,
+                pTrailers: null_mut(),
+                KnownHeaders: [HTTP_KNOWN_HEADER { RawValueLength: 0, pRawValue: PCSTR::null() }; 30]
+            },
+            EntityChunkCount: 0,
+            pEntityChunks: null_mut(),
+        },
+        ResponseInfoCount: 0,
+        pResponseInfo: null_mut(),
+    });
 
-    struct Transfer {
-        unknown: Vec<HTTP_UNKNOWN_HEADER>,
-        response: Box<HTTP_RESPONSE_V2>
-    }
-
-    impl Transfer {
-        fn new() -> Self {
-            let empty = HTTP_KNOWN_HEADER {
-                RawValueLength: 0,
-                pRawValue: PCSTR::null()
-            };
-
-            Self {
-                unknown: Vec::new(),
-                response: Box::new(HTTP_RESPONSE_V2 {
-                    Base: HTTP_RESPONSE_V1 {
-                        Flags: 0,
-                        Version: HTTP_VERSION {
-                            MajorVersion: 0,
-                            MinorVersion: 0,
-                        },
-                        StatusCode: 0,
-                        ReasonLength: 0,
-                        pReason: PCSTR::null(),
-                        Headers: HTTP_RESPONSE_HEADERS {
-                            UnknownHeaderCount: 0,
-                            pUnknownHeaders: null_mut(),
-                            TrailerCount: 0,
-                            pTrailers: null_mut(),
-                            KnownHeaders: [empty; 30]
-                        },
-                        EntityChunkCount: 0,
-                        pEntityChunks: null_mut(),
-                    },
-                    ResponseInfoCount: 0,
-                    pResponseInfo: null_mut(),
-                })
-            }
-        }
-
-        fn status(&mut self, status: f64, major: f64, minor: f64) {
-            let base = &mut self.response.Base;
-            base.StatusCode = status as u16;
-            base.Version = HTTP_VERSION {
-                MajorVersion: major as u16,
-                MinorVersion: minor as u16,
-            };
-        }
-
-        fn reason(&mut self, reason: &(*const u8, f64)) {
-            let base = &mut self.response.Base;
-            base.ReasonLength = reason.1 as u16;
-            base.pReason = PCSTR(reason.0);
-        }
-
-        fn add_known(&mut self, id: f64, value: &(*const u8, f64)) {
-            let base = &mut self.response.Base;
-            base.Headers.KnownHeaders[id as usize] = HTTP_KNOWN_HEADER {
-                RawValueLength: value.1 as u16,
-                pRawValue: PCSTR(value.0)
-            };
-        }
-
-        fn add_unknown(&mut self, name: &(*const u8, f64), value: &(*const u8, f64)) {
-            let vec = &mut self.unknown;
-            vec.push(HTTP_UNKNOWN_HEADER {
-                NameLength: name.1 as u16,
-                pName: PCSTR(name.0),
-                RawValueLength: value.1 as u16,
-                pRawValue: PCSTR(value.0)
-            });
-
-            let base = &mut self.response.Base;
-            base.Headers.UnknownHeaderCount = vec.len() as u16;
-            base.Headers.pUnknownHeaders = vec.as_mut_ptr();
-        }
-
-        fn source(&mut self) -> SendPointer<HTTP_RESPONSE_V2> {
-            SendPointer(self.response.as_mut())
-        }
-    }
-
-    unsafe impl Send for Transfer {
-
-    }
-
-    let mut transfer = Transfer::new();
+    let base = &mut response.as_mut().Base;
     let mut i = 3..cx.len();
     let opaque = arg_at::<JsBoolean>(&mut cx, &mut i)?.value(&mut cx);
     let more = arg_at::<JsBoolean>(&mut cx, &mut i)?.value(&mut cx);
     let status = arg_at::<JsNumber>(&mut cx, &mut i)?.value(&mut cx);
     let major = arg_at::<JsNumber>(&mut cx, &mut i)?.value(&mut cx);
     let minor = arg_at::<JsNumber>(&mut cx, &mut i)?.value(&mut cx);
+    base.StatusCode = status as u16;
+    base.Version = HTTP_VERSION {
+        MajorVersion: major as u16,
+        MinorVersion: minor as u16,
+    };
+
     let reason = arg_ptr_at(&mut cx, &block, &mut i)?;
-    transfer.status(status, major, minor);
-    transfer.reason(&reason);
+    base.ReasonLength = reason.1 as u16;
+    base.pReason = PCSTR(reason.0);
+
+    while !i.is_empty() {
+        let id = arg_at::<JsNumber>(&mut cx, &mut i)?.value(&mut cx);
+        let value = arg_ptr_at(&mut cx, &block, &mut i)?;
+        if id < 0.0 {
+            let name = arg_ptr_at(&mut cx, &block, &mut i)?;
+            unknown.push(HTTP_UNKNOWN_HEADER {
+                NameLength: name.1 as u16,
+                pName: PCSTR(name.0),
+                RawValueLength: value.1 as u16,
+                pRawValue: PCSTR(value.0)
+            });
+
+            base.Headers.UnknownHeaderCount = unknown.len() as u16;
+            base.Headers.pUnknownHeaders = unknown.as_mut_ptr();            
+        } else {
+            base.Headers.KnownHeaders[id as usize] = HTTP_KNOWN_HEADER {
+                RawValueLength: value.1 as u16,
+                pRawValue: PCSTR(value.0)
+            };
+        }
+    }
 
     let mut flags = 0;
     if opaque {
@@ -606,24 +572,12 @@ fn http_request_send(mut cx: FunctionContext) -> JsResult<JsPromise> {
         flags |= HTTP_SEND_RESPONSE_FLAG_MORE_DATA;
     }
 
-    while !i.is_empty() {
-        let id = arg_at::<JsNumber>(&mut cx, &mut i)?.value(&mut cx);
-        let value = arg_ptr_at(&mut cx, &block, &mut i)?;
-
-        if id < 0.0 {
-            let name = arg_ptr_at(&mut cx, &block, &mut i)?;
-            transfer.add_unknown(&name, &value);
-        } else {
-            transfer.add_known(id, &value);
-        }
-    }
-
+    let source = SendRef(response.as_mut() as *mut HTTP_RESPONSE_V2);
+    let transfer = SendRef((root, unknown, response));
     let tx = cx.channel();
-    let source = transfer.source();
     let (def, promise) = cx.promise();
     let func = async move {
         let result = arc.send(id, flags, source).await;
-        drop(root);
         drop(transfer);
 
         def.settle_with(&tx, move |mut cx| {
@@ -654,6 +608,7 @@ pub fn http_bind(cx: &mut ModuleContext) -> NeonResult<()> {
     cx.export_function("http_request_receive", http_request_receive)?;
     cx.export_function("http_request_receive_data", http_request_receive_data)?;
     cx.export_function("http_request_send", http_request_send)?;
+    // cx.export_function("http_request_send_data", http_request_send_data)?;
     cx.export_function("http_request_close", http_request_close)?;
 
     Ok(())

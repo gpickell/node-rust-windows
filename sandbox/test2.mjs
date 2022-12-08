@@ -48,7 +48,7 @@ async function try_it() {
     req.on("error", () => {});
 
     req.on("response", res => {
-        console.log("--- resposne", res.status, res.reason, res.httpVersion, res.rawHeaders);
+        console.log("--- resposne", res.statusCode, res.statusMessage, res.httpVersion, res.rawHeaders);
 
         res.setEncoding("utf-8");
         res.on("data", x => console.log("--- data", x));
