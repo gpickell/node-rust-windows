@@ -10,6 +10,7 @@ use windows::Win32::Networking::HttpServer::*;
 
 use core::ptr::*;
 use std::ffi::*;
+use std::slice::from_raw_parts;
 use std::mem;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -242,6 +243,21 @@ impl Request {
         }
     }
 
+    pub async fn send_data(&self, id: u64, flags: u32, source: SendRef<*mut HTTP_DATA_CHUNK>, count: u16) -> OverlappedResult<u32> {
+        unsafe {
+            let arc = self.arc.clone();
+            let mut helper = OverlappedHelper::new();
+            let mut result = OverlappedResult::<u32>::new(Auto(0), 4);
+            let slice = SendRef(from_raw_parts(source.0, count as usize));
+            let err = HttpSendResponseEntityBody(arc.0, id, flags, Some(slice.0), result.as_mut_ptr(), None, 0, helper.as_mut_ptr(), null_mut());
+
+            self.cancel_io_maybe(arc.0);
+            result.finish(arc.0, err, &mut helper).await;
+
+            result
+        }
+    }
+
     pub fn close(&self) {
         self.cancel_all.store(true, Relaxed);
 
@@ -452,7 +468,7 @@ fn http_request_receive_data(mut cx: FunctionContext) -> JsResult<JsPromise> {
     let mut data = cx.array_buffer(size as usize)?;
     let root = data.root(&mut cx);
     let slice = data.as_mut_slice(&mut cx);
-    let target = Slice(&mut slice[0], slice.len() as u32);
+    let target = Slice(slice.as_mut_ptr(), slice.len() as u32);
     let (def, promise) = cx.promise();
     let func = async move {
         let result = arc.receive_data(id, target).await;
@@ -473,7 +489,7 @@ fn http_request_receive_data(mut cx: FunctionContext) -> JsResult<JsPromise> {
 
             let js_data = root.to_inner(&mut cx);
             let slice = js_data.as_slice(&mut cx);
-            if &slice[0] as *const u8 == result.as_ptr() {
+            if slice.as_ptr() == result.as_ptr() {
                 obj.set(&mut cx, "data", js_data)?;
                 return Ok(obj);
             }
@@ -483,7 +499,7 @@ fn http_request_receive_data(mut cx: FunctionContext) -> JsResult<JsPromise> {
 
             unsafe {
                 let slice = js_data.as_mut_slice(&mut cx);
-                copy(result.as_ptr(), &mut slice[0], result.size as usize);
+                copy(result.as_ptr(), slice.as_mut_ptr(), result.size as usize);
             }
 
             Ok(obj)
@@ -589,6 +605,79 @@ fn http_request_send(mut cx: FunctionContext) -> JsResult<JsPromise> {
     Ok(promise)
 }
 
+fn http_request_send_data(mut cx: FunctionContext) -> JsResult<JsPromise> {
+    let arc = JsArc::<Request>::import(&mut cx, 0)?;
+    let id = **cx.argument::<JsBox<u64>>(1)?;
+    let block = cx.argument::<JsBuffer>(2)?;
+    let root = block.root(&mut cx);
+    let mut unknown = Vec::<HTTP_UNKNOWN_HEADER>::new();
+    let mut chunks = Vec::<HTTP_DATA_CHUNK>::new();
+    let mut i = 3..cx.len();
+    let opaque = arg_at::<JsBoolean>(&mut cx, &mut i)?.value(&mut cx);
+    let more = arg_at::<JsBoolean>(&mut cx, &mut i)?.value(&mut cx);
+    let data = arg_ptr_at(&mut cx, &block, &mut i)?;
+    if data.1 > 0 {
+        chunks.push(HTTP_DATA_CHUNK {
+            DataChunkType: HttpDataChunkFromMemory,
+            Anonymous: HTTP_DATA_CHUNK_0 {
+                FromMemory: HTTP_DATA_CHUNK_0_3 {
+                    BufferLength: data.1 as u32,
+                    pBuffer: data.0 as *mut c_void
+                }
+            }
+        });
+    }
+
+    while !i.is_empty() {
+        let name = arg_ptr_at(&mut cx, &block, &mut i)?;
+        let value = arg_ptr_at(&mut cx, &block, &mut i)?;
+        unknown.push(HTTP_UNKNOWN_HEADER {
+            NameLength: name.1 as u16,
+            pName: PCSTR(name.0),
+            RawValueLength: value.1 as u16,
+            pRawValue: PCSTR(value.0)
+        });
+    }
+
+    if unknown.len() > 0 {
+        chunks.push(HTTP_DATA_CHUNK {
+            DataChunkType: HttpDataChunkTrailers,
+            Anonymous: HTTP_DATA_CHUNK_0 {
+                Trailers: HTTP_DATA_CHUNK_0_4 {
+                    TrailerCount: unknown.len() as u16,
+                    pTrailers: unknown.as_mut_ptr()
+                }
+            }
+        });
+    }
+
+    let mut flags = 0;
+    if opaque {
+        flags |= HTTP_SEND_RESPONSE_FLAG_OPAQUE;
+    }
+
+    if more {
+        flags |= HTTP_SEND_RESPONSE_FLAG_MORE_DATA;
+    }
+
+    let count = chunks.len() as u16;
+    let source = SendRef(chunks.as_mut_ptr());
+    let transfer = SendRef((root, unknown, chunks));
+    let tx = cx.channel();
+    let (def, promise) = cx.promise();
+    let func = async move {
+        let result = arc.send_data(id, flags, source, count).await;
+        drop(transfer);
+
+        def.settle_with(&tx, move |mut cx| {
+            Ok(cx.number(result.err))
+        });
+    };
+
+    tasks().spawn_ok(func);
+    Ok(promise)
+}
+
 fn http_request_close(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let arc = JsArc::<Request>::import(&mut cx, 0)?;
     arc.close();
@@ -608,7 +697,7 @@ pub fn http_bind(cx: &mut ModuleContext) -> NeonResult<()> {
     cx.export_function("http_request_receive", http_request_receive)?;
     cx.export_function("http_request_receive_data", http_request_receive_data)?;
     cx.export_function("http_request_send", http_request_send)?;
-    // cx.export_function("http_request_send_data", http_request_send_data)?;
+    cx.export_function("http_request_send_data", http_request_send_data)?;
     cx.export_function("http_request_close", http_request_close)?;
 
     Ok(())

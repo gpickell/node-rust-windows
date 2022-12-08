@@ -21,16 +21,14 @@ async function receive_it() {
     console.log("--- state", req);
 
     console.log("--- receive data", await req.receiveData());
-    console.log("--- state", req);
-
     console.log("--- receive data", await req.receiveData());
-    console.log("--- state", req);
 
     req.response.status = 200;
     req.response.reason = "OK";
     req.response.addHeader("Cache-Control", "no-cache");
     req.response.addHeader("X-Test", "test1");
-    console.log("--- send", await req.send(true));
+    console.log("--- send", await req.send());
+    console.log("--- send data", await req.sendData("test123 asdf", true));
 }
 
 receive_it();

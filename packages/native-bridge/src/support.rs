@@ -100,12 +100,11 @@ pub fn arg_at<'a, T: Managed + Value>(cx: &mut FunctionContext<'a>, iter: &mut R
     return Ok(arg);
 }
 
-pub fn arg_ptr_at<'a>(cx: &mut FunctionContext<'a>, block: &Handle<'a, JsBuffer>, iter: &mut Range<i32>) -> NeonResult<(*const u8, f64)> {
-    let i = iter.next().unwrap_or(cx.len());
-    let arg = cx.argument::<JsNumber>(i)?.value(cx);
-    let slice = block.as_slice(cx);
-    let ptr: *const u8 = &slice[arg as usize];
-    return Ok((ptr, arg_at::<JsNumber>(cx, iter)?.value(cx)));
+pub fn arg_ptr_at<'a>(cx: &mut FunctionContext<'a>, block: &Handle<'a, JsBuffer>, iter: &mut Range<i32>) -> NeonResult<(*const u8, usize)> {
+    let arg = arg_at::<JsNumber>(cx, iter)?.value(cx) as usize;
+    let len = arg_at::<JsNumber>(cx, iter)?.value(cx) as usize;
+    let ptr = block.as_slice(cx)[arg..arg].as_ptr();
+    Ok((ptr, len))
 }
 
 pub fn opt_arg_at<'a, T: Managed + Value>(cx: &mut FunctionContext<'a>, i: i32) -> NeonResult<Option<Handle<'a, T>>> {

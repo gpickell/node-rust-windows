@@ -350,7 +350,11 @@ export class SystemHttpRequest {
     }
 
     // @ts-ignore
-    async sendData(data: Buffer, final = false) {
+    async sendData(data: Buffer | string, final = false) {
+        if (typeof data === "string") {
+            data = Buffer.from(data);
+        }
+
         if (final) {
             this.writable = false;
         }
@@ -364,7 +368,7 @@ export class SystemHttpRequest {
         if (!this.writable) {
             const { response } = this;
             for (const [name, value] of Object.entries(response.trailers)) {
-                addBlockHeader(block, name, value);
+                block.push(name, value);
             }
         }
 
