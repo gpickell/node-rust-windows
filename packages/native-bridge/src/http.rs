@@ -149,7 +149,7 @@ impl Session {
             Ok(Request::new(queue))
         }
     }
-    
+
     pub fn close(&self) {
         if !self.active.swap(true, Relaxed) {
             unsafe {
@@ -258,6 +258,24 @@ impl Request {
         }
     }
 
+    pub fn push(&self, id: u64, verb: i32, path: *const u16, query: *const u8, headers: *const HTTP_REQUEST_HEADERS ) -> Result<(), WinError> {
+        unsafe {
+            let arc = self.arc.clone();
+            let mut query_opt: Option<PCSTR> = None;
+            let tail = query.add(1);
+            if *tail != 0 {
+                query_opt = Some(PCSTR(tail))
+            }
+
+            let err = HttpDeclarePush(arc.0, id, HTTP_VERB(verb), PCWSTR(path), query_opt, Some(headers));
+            if err != 0 {
+                return Err(WinError("HttpDeclarePush", err));
+            }
+
+            Ok(())
+        }
+    }
+    
     pub fn close(&self) {
         self.cancel_all.store(true, Relaxed);
 
@@ -516,7 +534,7 @@ fn http_request_send(mut cx: FunctionContext) -> JsResult<JsPromise> {
     let block = cx.argument::<JsBuffer>(2)?;
     let root = block.root(&mut cx);
     let mut unknown = Vec::<HTTP_UNKNOWN_HEADER>::new();
-    let mut response = Box::<HTTP_RESPONSE_V2>::new(HTTP_RESPONSE_V2 {
+    let mut response = Box::new(HTTP_RESPONSE_V2 {
         Base: HTTP_RESPONSE_V1 {
             Flags: 0,
             Version: HTTP_VERSION {
@@ -531,7 +549,7 @@ fn http_request_send(mut cx: FunctionContext) -> JsResult<JsPromise> {
                 pUnknownHeaders: null_mut(),
                 TrailerCount: 0,
                 pTrailers: null_mut(),
-                KnownHeaders: [HTTP_KNOWN_HEADER { RawValueLength: 0, pRawValue: PCSTR::null() }; 30]
+                KnownHeaders: [HTTP_KNOWN_HEADER { RawValueLength: 0, pRawValue: PCSTR::null() }; HttpHeaderResponseMaximum.0 as usize]
             },
             EntityChunkCount: 0,
             pEntityChunks: null_mut(),
@@ -678,6 +696,52 @@ fn http_request_send_data(mut cx: FunctionContext) -> JsResult<JsPromise> {
     Ok(promise)
 }
 
+fn http_request_push(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+    let arc = JsArc::<Request>::import(&mut cx, 0)?;
+    let id = **cx.argument::<JsBox<u64>>(1)?;
+    let block = cx.argument::<JsBuffer>(2)?;
+    let mut unknown = Vec::<HTTP_UNKNOWN_HEADER>::new();
+    let mut headers = Box::new(HTTP_REQUEST_HEADERS {
+        UnknownHeaderCount: 0,
+        pUnknownHeaders: null_mut(),
+        TrailerCount: 0,
+        pTrailers: null_mut(),
+        KnownHeaders: [HTTP_KNOWN_HEADER { RawValueLength: 0, pRawValue: PCSTR::null() }; HttpHeaderRequestMaximum.0 as usize]
+    });
+
+    let base = headers.as_mut();
+    let mut i = 3..cx.len();
+    let verb = arg_at::<JsNumber>(&mut cx, &mut i)?.value(&mut cx) as i32;
+    let path = arg_ptr_at(&mut cx, &block, &mut i)?;
+    let query = arg_ptr_at(&mut cx, &block, &mut i)?;
+    while !i.is_empty() {
+        let id = arg_at::<JsNumber>(&mut cx, &mut i)?.value(&mut cx);
+        let value = arg_ptr_at(&mut cx, &block, &mut i)?;
+        if id < 0.0 {
+            let name = arg_ptr_at(&mut cx, &block, &mut i)?;
+            unknown.push(HTTP_UNKNOWN_HEADER {
+                NameLength: name.1 as u16,
+                pName: PCSTR(name.0),
+                RawValueLength: value.1 as u16,
+                pRawValue: PCSTR(value.0)
+            });
+
+            base.UnknownHeaderCount = unknown.len() as u16;
+            base.pUnknownHeaders = unknown.as_mut_ptr();            
+        } else {
+            base.KnownHeaders[id as usize] = HTTP_KNOWN_HEADER {
+                RawValueLength: value.1 as u16,
+                pRawValue: PCSTR(value.0)
+            };
+        }
+    }
+
+    match arc.push(id, verb, path.0 as *const u16, query.0, headers.as_ref()) {
+        Ok(_) => Ok(cx.undefined()),
+        Err(err) => cx.throw_type_error(format!("{}", err))
+    }
+}
+
 fn http_request_close(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let arc = JsArc::<Request>::import(&mut cx, 0)?;
     arc.close();
@@ -698,6 +762,7 @@ pub fn http_bind(cx: &mut ModuleContext) -> NeonResult<()> {
     cx.export_function("http_request_receive_data", http_request_receive_data)?;
     cx.export_function("http_request_send", http_request_send)?;
     cx.export_function("http_request_send_data", http_request_send_data)?;
+    cx.export_function("http_request_push", http_request_push)?;
     cx.export_function("http_request_close", http_request_close)?;
 
     Ok(())

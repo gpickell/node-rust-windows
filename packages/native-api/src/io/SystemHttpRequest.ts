@@ -89,7 +89,7 @@ function initMapper() {
         return i !== undefined ? i : -1;
     }
 
-    const verbs = [
+    const verbsByIndex = [
         undefined,
         undefined,
         undefined,
@@ -101,11 +101,22 @@ function initMapper() {
         "LOCK", "UNLOCK", "SEARCH",
     ];
 
-    function verb(i: number): string | undefined {
-        return verbs[i];
+    const verbsByName = Object.create(null) as Record<string, number>;
+    for (const [id, name] of verbsByIndex.entries()) {
+        if (typeof name === "string") {
+            verbsByName[name] = id;
+        }
     }
 
-    return { request, response, verb };
+    function verb(id: number): string | undefined {
+        return verbsByIndex[id];
+    }
+
+    function method(name: string) {
+        return verbsByName[name] || 0;
+    }
+
+    return { request, response, verb, method };
 }
 
 const mapper = initMapper();
@@ -130,19 +141,25 @@ function addTrailer<T extends Record<"trailers", Record<string, string>>>(this: 
     trailers[name] = value;
 }
 
-type BlockItem = Buffer | boolean | number | string;
+type BlockItem = Buffer | boolean | number | string | [string, BufferEncoding];
 
 function renderBlock(array: BlockItem[]) {
     let i = 0;
     const data: Buffer[] = [];
     const stage = array.map(x => {
+        let enc: BufferEncoding = "utf-8";
+        if (Array.isArray(x)) {
+            enc = x[1];
+            x = x[0];
+        }
+
         if (typeof x === "string") {
             const index = i;
-            const part = Buffer.from(x);
+            const part = Buffer.from(x, enc);
             const len = part.byteLength;
             data.push(part);
-            data.push(Buffer.alloc(1));
-            i += len + 1;
+            data.push(Buffer.alloc(2));
+            i += len + 2;
 
             return [index, len];
         }
@@ -242,11 +259,10 @@ export class SystemHttpRequest {
     // @ts-ignore
     push(method: string, url: string, headers?: Record<string, string> | false = false) {
         const path = url.replace(/\?.*/, "");
-        const query = url.substring(path.length + 1);
+        const query = url.substring(path.length);
         const block: BlockItem[] = [
-            method,
-            path,
-            path === url,
+            mapper.method(method),
+            [path, "ucs-2"],
             query,
         ];
 
