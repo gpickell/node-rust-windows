@@ -231,29 +231,46 @@ const protoResponse: ResponseData = {
 
     addHeader,
     addTrailer
-};    
+};
+
+type Data = string | Buffer | (string | Buffer)[];
+
+function toBuffer(data: string | Buffer) {
+    return typeof data === "string" ? Buffer.from(data) : data;
+}
 
 export class SystemHttpRequest {
     readonly id: unknown;
     readonly ref: unknown;
 
-    request: RequestData = Object.create(protoRequest);
-    response: ResponseData = Object.create(protoResponse);
+    readonly request: RequestData = Object.create(protoRequest);
+    readonly response: ResponseData = Object.create(protoResponse);
 
     readable = true;
     writable = true;
 
+    chunked = false;
+    disconnect = false;
     opaque = false;
     speedy = false;
 
     constructor(ref: unknown) {
         svc = NodePlugin.setup();
+
+        this.done = this.done.bind(this);
         this.ref = ref;
     }
 
+    done() {
+        return !!this.ref;
+    }
+
     close() {
-        this.ref && svc.http_request_close(this.ref);
-        Object.assign(this, { id: undefined, ref: undefined })
+        const { ref } = this;
+        if (ref) {
+            Object.assign(this, { id: undefined, ref: undefined });
+            svc.http_request_close(ref);
+        }
     }
 
     // @ts-ignore
@@ -275,8 +292,14 @@ export class SystemHttpRequest {
     }
 
     async cancel(): Promise<number | undefined> {
-        if (this.id) {
-            return await svc.http_request_cancel(this.ref, this.id);
+        const { id, ref } = this;
+        if (id && ref) {
+            Object.assign(this, { id: undefined, ref: undefined });
+            
+            const result = await svc.http_request_cancel(ref, id);
+            svc.http_request_close(ref);
+
+            return result;
         }
 
         return undefined;
@@ -321,7 +344,7 @@ export class SystemHttpRequest {
         return true;
     }
 
-    async receiveData(size?: number): Promise<Buffer | number | undefined> {
+    async receiveData(size?: number) {
         const result = await svc.http_request_receive_data(this.ref, this.id, size);
         if (result.eof) {
             this.readable = false;
@@ -329,7 +352,7 @@ export class SystemHttpRequest {
         }
 
         if (result.code) {
-            return result.code;
+            return result.code as number;
         }
 
         return Buffer.from(result.data, 0, result.size);
@@ -346,12 +369,17 @@ export class SystemHttpRequest {
         const block: BlockItem[] = [
             this.opaque,
             this.writable,
+            !this.writable && this.disconnect,
             response.status,
             Number(major), Number(minor),
             response.reason,
         ];
 
         for (const [name, value] of Object.entries(response.headers)) {
+            if (name.toLowerCase() === "transfer-encoding" && value === "chunked") {
+                this.chunked = true;
+            }
+
             addBlockHeader(block, name, value);
         }
 
@@ -362,13 +390,14 @@ export class SystemHttpRequest {
         }
 
         // console.log(renderBlock(block));
-        return await svc.http_request_send(this.ref, this.id, ...renderBlock(block));
+        const result = await svc.http_request_send(this.ref, this.id, ...renderBlock(block));
+        return result as number;
     }
 
     // @ts-ignore
-    async sendData(data: Buffer | string, final = false) {
-        if (typeof data === "string") {
-            data = Buffer.from(data);
+    async sendData(data: Data, final = false) {
+        if (!Array.isArray(data)) {
+            data = [data];
         }
 
         if (final) {
@@ -378,18 +407,41 @@ export class SystemHttpRequest {
         const block: BlockItem[] = [
             this.opaque,
             this.writable,
-            data,
+            !this.writable && this.disconnect,
         ];
 
-        if (!this.writable) {
+        let hasTrailers = false;
+        if (!this.writable && this.chunked) {
             const { response } = this;
             for (const [name, value] of Object.entries(response.trailers)) {
+                hasTrailers = true;
                 block.push(name, value);
             }
         }
 
+        let chunks = data.map(toBuffer);
+        chunks = chunks.filter(x => x.byteLength > 0);
+
+        if (this.chunked) {
+            const array = chunks.map(x => {
+                const len = x.byteLength.toString(16);
+                return [`${len}\r\n`, x, "\r\n"];
+            });
+
+            if (!this.writable) {
+                array.push(["0\r\n"]);
+
+                if (!hasTrailers) {
+                    array.push(["\r\n"]);
+                }
+            }
+            
+            chunks = array.flat().map(toBuffer);
+        }
+
         // console.log(renderBlock(block));
-        return await svc.http_request_send_data(this.ref, this.id, ...renderBlock(block));
+        const result = await svc.http_request_send_data(this.ref, this.id, chunks.length, ...chunks, ...renderBlock(block));
+        return result as number;
     }
 }
 

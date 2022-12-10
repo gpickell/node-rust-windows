@@ -30,7 +30,6 @@ unsafe impl<T> Send for SendRef<T> {
 
 struct Session {
     active: AtomicBool,
-    controller: bool,
     queue: HANDLE,
     session: u64,
     urls: u64,
@@ -39,12 +38,10 @@ struct Session {
 impl Session {
     pub fn create(name: Option<&str>) -> Result<Session, WinError> {
         unsafe {
-            let mut controller = false;
             let mut flags = 0;
             let mut name_ptr = PCWSTR::null();
             let name_wide;
             if let Some(str) = name {
-                controller = true;
                 flags = HTTP_CREATE_REQUEST_QUEUE_FLAG_CONTROLLER;
                 name_wide = wide(str);
                 name_ptr = wide_ptr(&name_wide);
@@ -94,7 +91,7 @@ impl Session {
                 return Err(WinError("HttpSetUrlGroupProperty", err));
             }
    
-            Ok(Self { active: AtomicBool::new(false), controller, queue, session, urls })
+            Ok(Self { active: AtomicBool::new(false), queue, session, urls })
         }
     }
 
@@ -116,7 +113,7 @@ impl Session {
                 return Err(WinError("HttpCreateRequestQueue", err));
             }
 
-            Ok(Self { active: AtomicBool::new(false), controller: false, queue, session: 0, urls: 0 })
+            Ok(Self { active: AtomicBool::new(false), queue, session: 0, urls: 0 })
         }
     }
 
@@ -318,11 +315,6 @@ fn http_session_open(mut cx: FunctionContext) -> JsArcResult<Session> {
         Ok(session) => JsArc::export(&mut cx, session),
         Err(err) => cx.throw_type_error(format!("{}", err))
     } 
-}
-
-fn http_session_is_controller(mut cx: FunctionContext) -> JsResult<JsBoolean> {
-    let arc = JsArc::<Session>::import(&mut cx, 0)?;
-    Ok(cx.boolean(arc.controller))
 }
 
 fn http_session_listen(mut cx: FunctionContext) -> JsResult<JsUndefined> {
@@ -531,8 +523,7 @@ fn http_request_receive_data(mut cx: FunctionContext) -> JsResult<JsPromise> {
 fn http_request_send(mut cx: FunctionContext) -> JsResult<JsPromise> {
     let arc = JsArc::<Request>::import(&mut cx, 0)?;
     let id = **cx.argument::<JsBox<u64>>(1)?;
-    let block = cx.argument::<JsBuffer>(2)?;
-    let root = block.root(&mut cx);
+    let mut i = 2..cx.len();
     let mut unknown = Vec::<HTTP_UNKNOWN_HEADER>::new();
     let mut response = Box::new(HTTP_RESPONSE_V2 {
         Base: HTTP_RESPONSE_V1 {
@@ -558,10 +549,12 @@ fn http_request_send(mut cx: FunctionContext) -> JsResult<JsPromise> {
         pResponseInfo: null_mut(),
     });
 
+    let block = arg_at::<JsBuffer>(&mut cx, &mut i)?;
+    let root = block.root(&mut cx);
     let base = &mut response.as_mut().Base;
-    let mut i = 3..cx.len();
     let opaque = arg_at::<JsBoolean>(&mut cx, &mut i)?.value(&mut cx);
     let more = arg_at::<JsBoolean>(&mut cx, &mut i)?.value(&mut cx);
+    let disconnect = arg_at::<JsBoolean>(&mut cx, &mut i)?.value(&mut cx);
     let status = arg_at::<JsNumber>(&mut cx, &mut i)?.value(&mut cx);
     let major = arg_at::<JsNumber>(&mut cx, &mut i)?.value(&mut cx);
     let minor = arg_at::<JsNumber>(&mut cx, &mut i)?.value(&mut cx);
@@ -606,6 +599,10 @@ fn http_request_send(mut cx: FunctionContext) -> JsResult<JsPromise> {
         flags |= HTTP_SEND_RESPONSE_FLAG_MORE_DATA;
     }
 
+    if disconnect {
+        flags |= HTTP_SEND_RESPONSE_FLAG_DISCONNECT;
+    }
+
     let source = SendRef(response.as_mut() as *mut HTTP_RESPONSE_V2);
     let transfer = SendRef((root, unknown, response));
     let tx = cx.channel();
@@ -626,26 +623,37 @@ fn http_request_send(mut cx: FunctionContext) -> JsResult<JsPromise> {
 fn http_request_send_data(mut cx: FunctionContext) -> JsResult<JsPromise> {
     let arc = JsArc::<Request>::import(&mut cx, 0)?;
     let id = **cx.argument::<JsBox<u64>>(1)?;
-    let block = cx.argument::<JsBuffer>(2)?;
-    let root = block.root(&mut cx);
-    let mut unknown = Vec::<HTTP_UNKNOWN_HEADER>::new();
+    let mut i = 2..cx.len();
+    let mut count = arg_at::<JsNumber>(&mut cx, &mut i)?.value(&mut cx) as u16;
     let mut chunks = Vec::<HTTP_DATA_CHUNK>::new();
-    let mut i = 3..cx.len();
-    let opaque = arg_at::<JsBoolean>(&mut cx, &mut i)?.value(&mut cx);
-    let more = arg_at::<JsBoolean>(&mut cx, &mut i)?.value(&mut cx);
-    let data = arg_ptr_at(&mut cx, &block, &mut i)?;
-    if data.1 > 0 {
-        chunks.push(HTTP_DATA_CHUNK {
-            DataChunkType: HttpDataChunkFromMemory,
-            Anonymous: HTTP_DATA_CHUNK_0 {
-                FromMemory: HTTP_DATA_CHUNK_0_3 {
-                    BufferLength: data.1 as u32,
-                    pBuffer: data.0 as *mut c_void
+    let mut unknown = Vec::<HTTP_UNKNOWN_HEADER>::new();
+    let mut roots = Vec::<Root<JsBuffer>>::new();
+    while count > 0 {
+        let mut block = arg_at::<JsBuffer>(&mut cx, &mut i)?;
+        roots.push(block.root(&mut cx));
+
+        let slice = block.as_mut_slice(&mut cx);
+        if slice.len() > 0 {
+            chunks.push(HTTP_DATA_CHUNK {
+                DataChunkType: HttpDataChunkFromMemory,
+                Anonymous: HTTP_DATA_CHUNK_0 {
+                    FromMemory: HTTP_DATA_CHUNK_0_3 {
+                        BufferLength: slice.len() as u32,
+                        pBuffer: slice.as_mut_ptr() as *mut c_void
+                    }
                 }
-            }
-        });
+            });            
+        }
+
+        count -= 1;
     }
 
+    let block = arg_at::<JsBuffer>(&mut cx, &mut i)?;
+    roots.push(block.root(&mut cx));
+
+    let opaque = arg_at::<JsBoolean>(&mut cx, &mut i)?.value(&mut cx);
+    let more = arg_at::<JsBoolean>(&mut cx, &mut i)?.value(&mut cx);
+    let disconnect = arg_at::<JsBoolean>(&mut cx, &mut i)?.value(&mut cx);
     while !i.is_empty() {
         let name = arg_ptr_at(&mut cx, &block, &mut i)?;
         let value = arg_ptr_at(&mut cx, &block, &mut i)?;
@@ -678,9 +686,13 @@ fn http_request_send_data(mut cx: FunctionContext) -> JsResult<JsPromise> {
         flags |= HTTP_SEND_RESPONSE_FLAG_MORE_DATA;
     }
 
+    if disconnect {
+        flags |= HTTP_SEND_RESPONSE_FLAG_DISCONNECT;
+    }
+
     let count = chunks.len() as u16;
     let source = SendRef(chunks.as_mut_ptr());
-    let transfer = SendRef((root, unknown, chunks));
+    let transfer = SendRef((roots, unknown, chunks));
     let tx = cx.channel();
     let (def, promise) = cx.promise();
     let func = async move {
@@ -699,7 +711,7 @@ fn http_request_send_data(mut cx: FunctionContext) -> JsResult<JsPromise> {
 fn http_request_push(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let arc = JsArc::<Request>::import(&mut cx, 0)?;
     let id = **cx.argument::<JsBox<u64>>(1)?;
-    let block = cx.argument::<JsBuffer>(2)?;
+    let mut i = 2..cx.len();
     let mut unknown = Vec::<HTTP_UNKNOWN_HEADER>::new();
     let mut headers = Box::new(HTTP_REQUEST_HEADERS {
         UnknownHeaderCount: 0,
@@ -709,8 +721,8 @@ fn http_request_push(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         KnownHeaders: [HTTP_KNOWN_HEADER { RawValueLength: 0, pRawValue: PCSTR::null() }; HttpHeaderRequestMaximum.0 as usize]
     });
 
+    let block = arg_at::<JsBuffer>(&mut cx, &mut i)?;
     let base = headers.as_mut();
-    let mut i = 3..cx.len();
     let verb = arg_at::<JsNumber>(&mut cx, &mut i)?.value(&mut cx) as i32;
     let path = arg_ptr_at(&mut cx, &block, &mut i)?;
     let query = arg_ptr_at(&mut cx, &block, &mut i)?;
@@ -752,7 +764,6 @@ fn http_request_close(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 pub fn http_bind(cx: &mut ModuleContext) -> NeonResult<()> {
     cx.export_function("http_session_create", http_session_create)?;
     cx.export_function("http_session_open", http_session_open)?;
-    cx.export_function("http_session_is_controller", http_session_is_controller)?;
     cx.export_function("http_session_listen", http_session_listen)?;
     cx.export_function("http_session_request", http_session_request)?;
     cx.export_function("http_session_close", http_session_close)?;

@@ -4,10 +4,12 @@ import SystemHttpRequest from "./SystemHttpRequest";
 let svc: any;
 
 export class SystemHttpSession {
+    readonly controller: boolean;
     readonly ref: unknown;
     readonly name?: string;
 
-    constructor(ref: unknown, name?: string) {
+    constructor(ref: unknown, name?: string, controller?: boolean) {
+        this.controller = !!controller;
         this.ref = ref;
         this.name = name;
     }
@@ -16,7 +18,7 @@ export class SystemHttpSession {
         svc = NodePlugin.setup();
 
         let ref = svc.http_session_create(name);
-        return new this(ref, name);
+        return new this(ref, name, name !== undefined);
     }
 
     static open(name: string) {
@@ -26,13 +28,13 @@ export class SystemHttpSession {
         return new this(ref, name);
     }
 
+    done() {
+        return !!this.ref;
+    }
+
     close() {
         this.ref && svc.http_session_close(this.ref);
         Object.assign(this, { ref: undefined });
-    }
-
-    isController() {
-        return svc.http_session_is_controller(this.ref);
     }
 
     listen(url: string) {
