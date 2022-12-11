@@ -1,6 +1,7 @@
 import NodePlugin from "../NodePlugin";
 
 let svc: any;
+let init = false;
 
 export class SystemHttpSession {
     readonly ref: unknown;
@@ -14,7 +15,8 @@ export class SystemHttpSession {
 
     static create(name: string) {
         svc = NodePlugin.setup();
-        svc.http_init(false, true);
+        init || svc.http_init(false, true);
+        init = true;
 
         let ref = svc.http_session_create(name);
         return new this(ref, name);

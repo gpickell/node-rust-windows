@@ -239,6 +239,8 @@ function toBuffer(data: string | Buffer) {
     return typeof data === "string" ? Buffer.from(data) : data;
 }
 
+let init = false;
+
 export class SystemHttpRequest {
     readonly id: unknown;
     readonly ref: unknown;
@@ -263,7 +265,8 @@ export class SystemHttpRequest {
 
     static create(name: string) {
         svc = NodePlugin.setup();
-        svc.http_init(false, true);
+        init || svc.http_init(false, true);
+        init = true;
 
         const ref = svc.http_request_create(name);
         return new this(ref, name);

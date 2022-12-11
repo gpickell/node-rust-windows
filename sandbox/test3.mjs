@@ -1,4 +1,4 @@
-import http from "http";
+import http, { Agent } from "http";
 
 import NodePlugin from "@tsereact/node-rust-windows-native-api/NodePlugin";
 import Manager from "@tsereact/node-rust-windows-native-api/io/SystemHttpManager";
@@ -44,10 +44,12 @@ server.on("request", (req, res) => {
     //res.end();
 });
 
+const agent = new Agent({ keepAlive: true, noDelay: true })
+
 async function test(ms) {
     await new Promise(x => setTimeout(x, ms));
 
-    const req = http.request("http://localhost:9480/", { method: "POST" });
+    const req = http.request("http://localhost:9480/", { agent, method: "POST" });
     req.on("error", x => console.log("--- client error", x.message));
 
     req.on("response", res => {
@@ -65,4 +67,4 @@ async function test(ms) {
 }
 
 test(300);
-test(1300);
+test(600);

@@ -414,13 +414,15 @@ class RelayHelper {
             });
 
             request.on("response", response => {
+                const te = (response.headers["transfer-encoding"] || "").toLowerCase();
+                const cl = (response.headers["content-length"] || "").toLowerCase();
                 Object.assign(this, { response });
 
                 const res = native.response;
                 res.status = response.statusCode || 0;
                 res.reason = response.statusMessage || "Unknown";
                 res.headers = headersFromRaw(response.rawHeaders);
-                native.disconnect = response.headers["transfer-encoding"] !== "chunked" && response.headers["content-length"] === undefined;
+                native.disconnect = te !== "chunked" && !cl;
                 ignoreClose = true;
                 response.pause();
 
