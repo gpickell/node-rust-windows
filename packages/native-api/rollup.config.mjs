@@ -3,12 +3,15 @@ import { defineConfig } from "rollup";
 
 import typescript from "@rollup/plugin-typescript";
 
+const inputs = [
+    "NodePlugin",
+    "io/SystemHttpManager",
+    "io/SystemHttpRequest",
+    "io/SystemHttpSession",
+];
+
 export default defineConfig({
-    input: {
-        "NodePlugin": "src/NodePlugin.ts",
-        "io/SystemHttpRequest": "src/io/SystemHttpRequest.ts",
-        "io/SystemHttpSession": "src/io/SystemHttpSession.ts"
-    },
+    input: Object.fromEntries(inputs.map(x => [x, `src/${x}.ts`])),
 
     external(id, importer) {
         if (!isAbsolute(id) && id[0] !== ".") {

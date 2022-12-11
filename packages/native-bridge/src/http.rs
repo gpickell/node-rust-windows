@@ -4,7 +4,6 @@ use windows::core::PCSTR;
 use windows::core::PCWSTR;
 
 use windows::Win32::System::IO::*;
-use windows::Win32::System::Threading::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Networking::HttpServer::*;
 
@@ -36,38 +35,27 @@ struct Session {
 }
 
 impl Session {
-    pub fn create(name: Option<&str>) -> Result<Session, WinError> {
+    pub fn create(name: &str) -> Result<Session, WinError> {
         unsafe {
-            let mut flags = 0;
-            let mut name_ptr = PCWSTR::null();
-            let name_wide;
-            if let Some(str) = name {
-                flags = HTTP_CREATE_REQUEST_QUEUE_FLAG_CONTROLLER;
-                name_wide = wide(str);
-                name_ptr = wide_ptr(&name_wide);
-            }
-
-            let mut err: u32;
-            err = HttpInitialize(ver_init, HTTP_INITIALIZE_SERVER, None);
-            if err != 0 {
-                return Err(WinError("HttpInitialize", err));
-            }
+            let flags = HTTP_CREATE_REQUEST_QUEUE_FLAG_CONTROLLER;
+            let name_wide = wide(name);
+            let name_ptr = wide_ptr(&name_wide);
 
             let mut session: u64 = 0;
-            err = HttpCreateServerSession(ver_init, &mut session, 0);
+            let err = HttpCreateServerSession(ver_init, &mut session, 0);
             if err != 0 {
                 return Err(WinError("HttpCreateServerSession", err));
             }
 
             let mut urls: u64 = 0;
-            err = HttpCreateUrlGroup(session, &mut urls, 0);
+            let err = HttpCreateUrlGroup(session, &mut urls, 0);
             if err != 0 {
                 HttpCloseServerSession(session);
                 return Err(WinError("HttpCreateUrlGroup", err));
             }
 
             let mut queue = HANDLE(-1);
-            err = HttpCreateRequestQueue(ver_init, name_ptr, null_mut(), flags, &mut queue);
+            let err = HttpCreateRequestQueue(ver_init, name_ptr, null_mut(), flags, &mut queue);
             if err != 0 {
                 HttpCloseServerSession(session);
                 HttpCloseUrlGroup(urls);
@@ -83,7 +71,7 @@ impl Session {
             };
 
             let size = mem::size_of::<HTTP_BINDING_INFO>() as u32;
-            err = HttpSetUrlGroupProperty(urls, prop, &info as *const HTTP_BINDING_INFO as *const c_void, size);
+            let err = HttpSetUrlGroupProperty(urls, prop, &info as *const HTTP_BINDING_INFO as *const c_void, size);
             if err != 0 {
                 HttpCloseUrlGroup(urls);
                 HttpCloseServerSession(session);
@@ -92,28 +80,6 @@ impl Session {
             }
    
             Ok(Self { active: AtomicBool::new(false), queue, session, urls })
-        }
-    }
-
-    pub fn open(name: &str) -> Result<Session, WinError> {
-        unsafe {
-            let flags = HTTP_CREATE_REQUEST_QUEUE_FLAG_OPEN_EXISTING;
-            let name_wide = wide(name);
-            let name_ptr = wide_ptr(&name_wide);
-
-            let mut err: u32;
-            err = HttpInitialize(ver_init, HTTP_INITIALIZE(1), None);
-            if err != 0 {
-                return Err(WinError("HttpInitialize", err));
-            }
-
-            let mut queue = HANDLE(-1);
-            err = HttpCreateRequestQueue(ver_init, name_ptr, null_mut(), flags, &mut queue);
-            if err != 0 {
-                return Err(WinError("HttpCreateRequestQueue", err));
-            }
-
-            Ok(Self { active: AtomicBool::new(false), queue, session: 0, urls: 0 })
         }
     }
 
@@ -126,24 +92,6 @@ impl Session {
             }
     
             Ok(())
-        }
-    }
-
-    pub fn request(&self) -> Result<Request, WinError> {
-        unsafe {
-            let mut queue = HANDLE(-1);
-            let opts = DUPLICATE_HANDLE_OPTIONS(2);
-            let this = GetCurrentProcess();
-            let result1 = DuplicateHandle(this, self.queue, this, &mut queue, 0, false, opts);
-            if !result1.as_bool() {
-                return Err(WinError("DuplicateHandle", GetLastError().0));
-            }
-
-            if !bind_io(queue) {
-                return Err(WinError("BindIoCompletionCallback", GetLastError().0));
-            }
-
-            Ok(Request::new(queue))
         }
     }
 
@@ -179,7 +127,7 @@ impl Request {
 
     unsafe fn cancel_io_maybe(&self, h: HANDLE) {
         if self.cancel_all.load(Relaxed) {
-            CancelIo(h);
+            CancelIoEx(h, None);
         }
     }
 
@@ -189,7 +137,6 @@ impl Request {
             let mut helper = OverlappedHelper::new();
             let mut result = OverlappedResult::<()>::new(Auto(0), 0);
             let err = HttpCancelHttpRequest(arc.0, id, helper.as_mut_ptr());
-
             self.cancel_io_maybe(arc.0);
             result.finish(arc.0, err, &mut helper).await;
 
@@ -204,7 +151,6 @@ impl Request {
             let mut result = OverlappedResult::<HTTP_REQUEST_V2>::new(target, 1024);
             let flags = HTTP_RECEIVE_HTTP_REQUEST_FLAGS(0);
             let err = HttpReceiveHttpRequest(arc.0, id, flags, result.as_mut_ptr(), result.capacity(), None, helper.as_mut_ptr());
-
             self.cancel_io_maybe(arc.0);
             result.finish(arc.0, err, &mut helper).await;
 
@@ -218,7 +164,6 @@ impl Request {
             let mut helper = OverlappedHelper::new();
             let mut result = OverlappedResult::<u8>::new(target, 256);
             let err = HttpReceiveRequestEntityBody(arc.0, id, 0, result.as_mut_ptr() as *mut c_void, result.capacity(), None, helper.as_mut_ptr());
-
             self.cancel_io_maybe(arc.0);
             result.finish(arc.0, err, &mut helper).await;
 
@@ -232,7 +177,6 @@ impl Request {
             let mut helper = OverlappedHelper::new();
             let mut result = OverlappedResult::<u32>::new(Auto(0), 4);
             let err = HttpSendHttpResponse(arc.0, id, flags, source.0, null_mut(), result.as_mut_ptr(), None, 0, helper.as_mut_ptr(), null_mut());
-
             self.cancel_io_maybe(arc.0);
             result.finish(arc.0, err, &mut helper).await;
 
@@ -247,7 +191,6 @@ impl Request {
             let mut result = OverlappedResult::<u32>::new(Auto(0), 4);
             let slice = SendRef(from_raw_parts(source.0, count as usize));
             let err = HttpSendResponseEntityBody(arc.0, id, flags, Some(slice.0), result.as_mut_ptr(), None, 0, helper.as_mut_ptr(), null_mut());
-
             self.cancel_io_maybe(arc.0);
             result.finish(arc.0, err, &mut helper).await;
 
@@ -277,7 +220,7 @@ impl Request {
         self.cancel_all.store(true, Relaxed);
 
         unsafe {
-            CancelIo(self.arc.0);
+            CancelIoEx(self.arc.0, None);
         }
     }
 }
@@ -295,26 +238,11 @@ use super::support::*;
 use neon::types::buffer::TypedArray;
 
 fn http_session_create(mut cx: FunctionContext) -> JsArcResult<Session> {
-    let name: String;
-    let mut name_opt: Option<&str> = None;
-    if let Some(arg) = opt_arg_at::<JsString>(&mut cx, 0)? {
-        name = arg.value(&mut cx);
-        name_opt = Some(&name);
-    }
-
-    match Session::create(name_opt) {
+    let name = cx.argument::<JsString>(0)?.value(&mut cx);
+    match Session::create(&name) {
         Ok(session) => JsArc::export(&mut cx, session),
         Err(err) => cx.throw_type_error(format!("{}", err))
     }
-}
-
-fn http_session_open(mut cx: FunctionContext) -> JsArcResult<Session> {
-    let arg = cx.argument::<JsString>(0)?;
-    let name = arg.value(&mut cx);
-    match Session::open(&name) {
-        Ok(session) => JsArc::export(&mut cx, session),
-        Err(err) => cx.throw_type_error(format!("{}", err))
-    } 
 }
 
 fn http_session_listen(mut cx: FunctionContext) -> JsResult<JsUndefined> {
@@ -332,14 +260,6 @@ fn http_session_close(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     arc.close();
 
     Ok(cx.undefined())
-}
-
-fn http_session_request(mut cx: FunctionContext) -> JsArcResult<Request> {
-    let arc = JsArc::<Session>::import(&mut cx, 0)?;
-    match arc.request() {
-        Ok(request) => JsArc::export(&mut cx, request),
-        Err(err) => cx.throw_type_error(format!("{}", err))
-    } 
 }
 
 fn http_request_cancel(mut cx: FunctionContext) -> JsResult<JsPromise> {
@@ -761,13 +681,59 @@ fn http_request_close(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     Ok(cx.undefined())
 }
 
+fn http_init(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+    let config = cx.argument::<JsBoolean>(0)?.value(&mut cx);
+    let server = cx.argument::<JsBoolean>(1)?.value(&mut cx);
+    let mut flags = 0u32;
+    if config {
+        flags |= HTTP_INITIALIZE_CONFIG.0;
+    }
+
+    if server {
+        flags |= HTTP_INITIALIZE_SERVER.0;
+    }
+
+    unsafe  {
+        let err = HttpInitialize(ver_init, HTTP_INITIALIZE(flags), None);
+        match err {
+            0 => Ok(cx.undefined()),
+            _ => cx.throw_type_error(format!("HttpInitialize: Win32_Error = {}", err))
+        }
+    }
+}
+
+fn http_request_create(mut cx: FunctionContext) -> JsArcResult<Request> {
+    let name = cx.argument::<JsString>(0)?.value(&mut cx);
+    unsafe {
+        let flags = HTTP_CREATE_REQUEST_QUEUE_FLAG_OPEN_EXISTING;
+        let name_wide = wide(&name);
+        let name_ptr = wide_ptr(&name_wide);
+
+        let mut queue = HANDLE(-1);
+        let err = HttpCreateRequestQueue(ver_init, name_ptr, null_mut(), flags, &mut queue);
+        if err != 0 {
+            return cx.throw_type_error(format!("HttpCreateRequestQueue: Win32_Error = {}", err));
+        }
+
+        if !bind_io(queue) {
+            CloseHandle(queue);
+            let err = GetLastError().0;
+            return cx.throw_type_error(format!("BindIoCompletionCallback: Win32_Error = {}", err));
+        }
+
+        let request = Request::new(queue);
+        JsArc::export(&mut cx, request)
+    }
+}
+
 pub fn http_bind(cx: &mut ModuleContext) -> NeonResult<()> {
+    cx.export_function("http_init", http_init)?;
+
     cx.export_function("http_session_create", http_session_create)?;
-    cx.export_function("http_session_open", http_session_open)?;
     cx.export_function("http_session_listen", http_session_listen)?;
-    cx.export_function("http_session_request", http_session_request)?;
     cx.export_function("http_session_close", http_session_close)?;
 
+    cx.export_function("http_request_create", http_request_create)?;
     cx.export_function("http_request_cancel", http_request_cancel)?;
     cx.export_function("http_request_receive", http_request_receive)?;
     cx.export_function("http_request_receive_data", http_request_receive_data)?;

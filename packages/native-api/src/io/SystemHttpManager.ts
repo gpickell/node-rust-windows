@@ -1,6 +1,6 @@
 import { EventEmitter } from "events";
 import { request, ClientRequest, IncomingMessage, InformationEvent } from "http";
-import { Duplex, Readable } from "stream";
+import { Duplex, Readable, Writable } from "stream";
 import { DuplexPair } from "./DuplexPair";
 
 import SystemHttpRequest, { RequestData, ResponseData } from "./SystemHttpRequest";
@@ -17,6 +17,7 @@ class OpQueue extends Set<() => boolean | Promise<boolean>> {
         }
 
         this.working = true;
+        await (0 as any);
 
         for (const action of this) {
             if (this.done()) {
@@ -35,6 +36,9 @@ class OpQueue extends Set<() => boolean | Promise<boolean>> {
         super();
         this.done = done;
         this.resolve = resolve;
+
+        this.good = this.good.bind(this);
+        this.fail = this.fail.bind(this);
     }
 
     push(fn: () => boolean | Promise<boolean>) {
@@ -48,15 +52,47 @@ class OpQueue extends Set<() => boolean | Promise<boolean>> {
     }
 
     good() {
-        this.clear();
-        this.done = () => true;
-        this.resolve(false);
+        this.push(() => {
+            this.clear();
+            this.done = () => true;
+            this.resolve(false);
+
+            return false;
+        });
     }
 
     fail() {
         this.clear();
         this.done = () => true;
         this.resolve(true);
+    }
+
+    receive(from: SystemHttpRequest, to: Writable) {
+        const relay = async () => {
+            const data = await from.receiveData();
+            if (Buffer.isBuffer(data)) {
+                if (to.write(data)) {
+                    this.push(relay);
+                }
+
+                return false;
+            }
+
+            if (data === undefined) {
+                to.end();
+                this.good();
+
+                return false;
+            }
+
+            return true;
+        };
+
+        to.on("drain", () => this.push(relay));
+        to.on("error", this.fail);
+        to.on("close", this.good);
+
+        this.push(relay);
     }
 
     send(from: Readable, to: SystemHttpRequest, end?: () => void) {
@@ -86,7 +122,7 @@ class OpQueue extends Set<() => boolean | Promise<boolean>> {
         });
 
         from.on("error", this.fail);
-        from.on("close", this.fail);
+        from.on("close", this.good);
 
         this.push(async () => {
             const result = await to.send();
@@ -98,6 +134,56 @@ class OpQueue extends Set<() => boolean | Promise<boolean>> {
             return false;
         });
     }
+}
+
+function relayContinue(native: SystemHttpRequest, info: InformationEvent) {
+    const expect = native.request.headers["Expect"] || "";
+    if (expect.toLowerCase() !== "100-continue") {
+        return false;
+    }
+
+    if (info.statusCode !== 100) {
+        return false;
+    }
+
+    return true;
+}
+
+function wantContinue(native: SystemHttpRequest) {
+    const req = native.request;
+    switch (req.method || "") {
+        case "CONNECT":
+        case "GET":
+        case "HEAD":
+        case "UPGRADE":
+            return false;
+    }
+
+    const headers = native.request.headers;
+    if (headers["Content-Length"]) {
+        return true;
+    }
+
+    if (headers["Transfer-Encoding"]) {
+        return true;
+    }
+
+    return false;
+}
+
+function headersFromRaw(raw: string[]) {
+    let key: string | undefined;
+    const headers = Object.create(null) as Record<string, string>;
+    for (const value of raw) {
+        if (key === undefined) {
+            key = value;
+        } else {
+            headers[key] = value;
+            key = undefined;
+        }
+    }
+
+    return headers;
 }
 
 export interface RelayRequestEvent {
@@ -152,7 +238,7 @@ class RelayHelper {
     readonly state: any = {};
 
     readonly native: SystemHttpRequest;
-    readonly request: ClientRequest;
+    readonly request?: ClientRequest;
     readonly response?: IncomingMessage;
     readonly source: DuplexPair;
     readonly target: DuplexPair;
@@ -160,16 +246,24 @@ class RelayHelper {
     constructor(native: SystemHttpRequest) {
         this.native = native;
         [this.source, this.target] = DuplexPair.create();
-
-        const source = this.source;
-        const { method, headers, url } = native.request;
-        this.request = request({ method, headers, path: url, createConnection: () => source as any });
     }
 
-    relayRequest(owner: SystemHttpManager) {
-        const { native, request, state } = this;
+    relayRequest(request: ClientRequest, owner: SystemHttpManager) {
+        const { native, source, state } = this;
         return new Promise<boolean>(resolve => {
             const ops = new OpQueue(() => native.done(), resolve);
+            request.on("connect", () => {
+                ops.receive(native, source);
+            });
+
+            request.on("upgrade", () => {
+                ops.receive(native, source);
+            });
+
+            request.on("continue", () => {
+                ops.receive(native, request);                
+            });
+
             ops.push(() => {
                 owner.emit("relay-request", {
                     initial: native.request,
@@ -177,17 +271,28 @@ class RelayHelper {
                     state,
                     drop: ops.fail
                 });
-
+               
                 return false;
             });
 
-            
+            ops.push(() => {
+                if (wantContinue(native)) {
+                    request.setHeader("Expect", "100-continue");
+                    request.flushHeaders();
+                } else {
+                    request.removeHeader("Expect");
+                    request.end();
+                    ops.good();
+                }
+
+                return false;
+            })
         });
     }
 
-    relayResponse(owner: SystemHttpManager) {
+    relayResponse(request: ClientRequest, owner: SystemHttpManager) {
         let ignoreClose = false;
-        const { native, source, request, state } = this;
+        const { native, source, state } = this;
         return new Promise<boolean>(resolve => {
             const ops = new OpQueue(() => native.done(), resolve);
             request.on("close", () => {
@@ -233,8 +338,14 @@ class RelayHelper {
             });
 
             request.on("connect", (response, _, head) => {
-                ignoreClose = true;
+                Object.assign(this, { response });
+
+                const res = native.response;
+                res.status = response.statusCode || 0;
+                res.reason = response.statusMessage || "Unknown";
+                res.headers = headersFromRaw(response.rawHeaders);
                 native.opaque = true;
+                ignoreClose = true;
                 source.pause();
                 head.byteLength && source.unshift(head);
 
@@ -248,7 +359,6 @@ class RelayHelper {
                         drop: ops.fail
                     });
 
-                    response.resume();
                     return false;
                 });
 
@@ -256,8 +366,14 @@ class RelayHelper {
             });
 
             request.on("upgrade", (response, _, head) => {
-                ignoreClose = true;
+                Object.assign(this, { response });
+
+                const res = native.response;
+                res.status = response.statusCode || 0;
+                res.reason = response.statusMessage || "Unknown";
+                res.headers = headersFromRaw(response.rawHeaders);
                 native.opaque = true;
+                ignoreClose = true;
                 source.pause();
                 head.byteLength && source.unshift(head);
 
@@ -271,20 +387,19 @@ class RelayHelper {
                         drop: ops.fail
                     });
 
-                    response.resume();
                     return false;
                 });
 
                 ops.send(source, native);
             });
 
-            let cont = false;
-            request.on("continue", () => {
-                cont = true;
-            });
-
             request.on("information", info => {
-                cont && ops.push(async () => {
+                relayContinue(native, info) && ops.push(async () => {
+                    const res = native.response;
+                    res.status = info.statusCode;
+                    res.reason = info.statusMessage;
+                    res.headers = headersFromRaw(info.rawHeaders);
+    
                     owner.emit("relay-continue", {
                         initial: native.request,
                         sent: request,
@@ -299,8 +414,14 @@ class RelayHelper {
             });
 
             request.on("response", response => {
-                ignoreClose = true;
                 Object.assign(this, { response });
+
+                const res = native.response;
+                res.status = response.statusCode || 0;
+                res.reason = response.statusMessage || "Unknown";
+                res.headers = headersFromRaw(response.rawHeaders);
+                native.disconnect = response.headers["transfer-encoding"] !== "chunked" && response.headers["content-length"] === undefined;
+                ignoreClose = true;
                 response.pause();
 
                 ops.push(async () => {
@@ -313,11 +434,12 @@ class RelayHelper {
                         drop: ops.fail
                     });
 
-                    response.resume();
                     return false;
                 });
 
                 ops.send(response, native, () => {
+                    res.trailers = response.trailers as any;
+
                     owner.emit("relay-trailers", {
                         initial: native.request,
                         sent: request,
@@ -332,14 +454,19 @@ class RelayHelper {
     }
 
     async relay(owner: SystemHttpManager) {
-        const { native } = this;
-        const req = this.relayRequest(owner);
-        const res = this.relayResponse(owner);
+        const { native, source } = this;
+        const { method, headers, url } = native.request;
+        const client = request({ method, headers, path: url, createConnection: () => source as any });
+        Object.assign(this, { request: client });
+        owner.emit("handoff", this.target);
+
+        const req = this.relayRequest(client, owner);
+        const res = this.relayResponse(client, owner);
         const both = new Promise<boolean>(resolve => {
             req.then(x => x || res).then(resolve);
             res.then(x => x || req).then(resolve);
         });
-       
+
         if (await both) {
             await native.cancel();
             this.destroy();
@@ -388,44 +515,33 @@ export class SystemHttpManager extends EventEmitter {
     private sessions = new Set<SystemHttpSession>();
     private session?: SystemHttpSession;
 
-    private async pump(session: SystemHttpSession) {
+    public async process(name: string) {
         const { requests } = this;
-        while (!session.done()) {
-            const native = session.request();
+        while (true) {
+            const native = SystemHttpRequest.create(name);
+            const helper = new RelayHelper(native);
+            requests.add(helper);
+
             const result = await native.receive();
-            if (result !== true) {
-                const helper = new RelayHelper(native);
-                requests.add(helper);
+            if (result === false) {
+                requests.delete(helper);
+                helper.destroy();
+
+                break;
+            }
+
+            if (result === true) {
                 helper.relay(this).then(() => requests.delete(helper));
             } else {
                 await native.cancel();
-                native.close();
+                helper.destroy();
             }
         }
-
-        this.sessions.delete(session);
-
-        if (session == this.session) {
-            this.session = undefined;
-        }
     }
 
-    createSession(name?: string) {
-        const session = SystemHttpSession.create(name);
+    createSession(name: string) {
+        const session = this.session = SystemHttpSession.create(name);
         this.sessions.add(session);
-
-        if (!session.controller) {
-            this.pump(session);
-        }
-    }
-
-    openSession(name: string) {
-        const session = SystemHttpSession.open(name);
-        this.sessions.add(session);
-
-        if (!session.controller) {
-            this.pump(session);
-        }
     }
 
     listen(urlPrefix: string) {
@@ -438,14 +554,14 @@ export class SystemHttpManager extends EventEmitter {
     }
 
     close() {
-        this.requests.forEach(x => x.destroy());
-        this.requests.clear();
-
         this.sessions.forEach(x => x.close());
         this.sessions.clear();
+
+        this.requests.forEach(x => x.destroy());
+        this.requests.clear();
 
         this.session = undefined;
     }
 }
 
-export default SystemHttpRequest;
+export default SystemHttpManager;

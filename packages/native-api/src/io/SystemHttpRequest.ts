@@ -242,6 +242,7 @@ function toBuffer(data: string | Buffer) {
 export class SystemHttpRequest {
     readonly id: unknown;
     readonly ref: unknown;
+    readonly name: string;
 
     readonly request: RequestData = Object.create(protoRequest);
     readonly response: ResponseData = Object.create(protoResponse);
@@ -254,15 +255,22 @@ export class SystemHttpRequest {
     opaque = false;
     speedy = false;
 
-    constructor(ref: unknown) {
-        svc = NodePlugin.setup();
-
+    constructor(ref: unknown, name: string) {
         this.done = this.done.bind(this);
         this.ref = ref;
+        this.name = name;
+    }
+
+    static create(name: string) {
+        svc = NodePlugin.setup();
+        svc.http_init(false, true);
+
+        const ref = svc.http_request_create(name);
+        return new this(ref, name);
     }
 
     done() {
-        return !!this.ref;
+        return !this.ref;
     }
 
     close() {
@@ -287,16 +295,15 @@ export class SystemHttpRequest {
             addBlockHeader(block, name, value);
         }
         
-        const result = svc.http_request_push(this.ref, this.id, ...renderBlock(block));
-        return result.code;
+        svc.http_request_push(this.ref, this.id, ...renderBlock(block));
     }
 
-    async cancel(): Promise<number | undefined> {
+    async cancel() {
         const { id, ref } = this;
         if (id && ref) {
             Object.assign(this, { id: undefined, ref: undefined });
             
-            const result = await svc.http_request_cancel(ref, id);
+            const result = await svc.http_request_cancel(ref, id) as number;
             svc.http_request_close(ref);
 
             return result;
@@ -307,6 +314,10 @@ export class SystemHttpRequest {
 
     async receive(size?: number) {
         const { knownHeaders, unknownHeaders, id, ...rest } = await svc.http_request_receive(this.ref, size);
+        if (rest.code === 995) {
+            return false;
+        }
+
         if (rest.code !== 0) {
             return rest.code as number;
         }
@@ -314,7 +325,7 @@ export class SystemHttpRequest {
         Object.assign(this, { id });
 
         if (rest.more) {
-            return false;
+            return 0;
         }
 
         const { request, response } = this;

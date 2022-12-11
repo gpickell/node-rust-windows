@@ -3,21 +3,20 @@ import net from "net";
 
 import NodePlugin from "@tsereact/node-rust-windows-native-api/NodePlugin";
 import Session from "@tsereact/node-rust-windows-native-api/io/SystemHttpSession";
+import Request from "@tsereact/node-rust-windows-native-api/io/SystemHttpRequest";
 
 NodePlugin.setup(import.meta.url);
 
-const sess = Session.create("test-v4");
+const name = "test-v4";
+const sess = Session.create(name);
 sess.listen("http://localhost:9480/");
-
-const queue = Session.open("test-v4");
 
 process.on("exit", () => {
     sess.close();
-    queue.close();
 });
 
 async function receive_it() {
-    const req = queue.request();
+    const req = Request.create(name);
     console.log("--- receive", await req.receive());
     console.log("--- state", req);
 
@@ -29,9 +28,9 @@ async function receive_it() {
     req.response.reason = "OK";
     req.response.addHeader("Cache-Control", "no-cache");
     //req.response.addHeader("Content-Length", "12");
-    //req.response.addHeader("Transfer-Encoding", "chunked");
+    req.response.addHeader("Transfer-Encoding", "chunked");
     req.response.addHeader("X-Test", "test1");
-    //req.response.addTrailer("X-Trailer", "test22");
+    req.response.addTrailer("X-Trailer", "test22");
     console.log("--- send", await req.send());
     console.log("--- send data", await req.sendData("test123 asdf", true));
 }
@@ -52,7 +51,7 @@ async function try_it() {
         method: "POST",
         headers: {
             "X-Test-Header": "test-value",
-            "Transfer-Encoding": "chunked",
+            //"Transfer-Encoding": "chunked",
         },        
     });
 

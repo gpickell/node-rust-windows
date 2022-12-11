@@ -1,35 +1,27 @@
 import NodePlugin from "../NodePlugin";
-import SystemHttpRequest from "./SystemHttpRequest";
 
 let svc: any;
 
 export class SystemHttpSession {
-    readonly controller: boolean;
     readonly ref: unknown;
     readonly name?: string;
 
-    constructor(ref: unknown, name?: string, controller?: boolean) {
-        this.controller = !!controller;
+    constructor(ref: unknown, name?: string) {
+        this.done = this.done.bind(this);
         this.ref = ref;
         this.name = name;
     }
 
-    static create(name?: string) {
+    static create(name: string) {
         svc = NodePlugin.setup();
+        svc.http_init(false, true);
 
         let ref = svc.http_session_create(name);
-        return new this(ref, name, name !== undefined);
-    }
-
-    static open(name: string) {
-        svc = NodePlugin.setup();
-
-        let ref = svc.http_session_open(name);
         return new this(ref, name);
     }
 
     done() {
-        return !!this.ref;
+        return !this.ref;
     }
 
     close() {
@@ -39,11 +31,6 @@ export class SystemHttpSession {
 
     listen(url: string) {
         svc.http_session_listen(this.ref, url);
-    }
-
-    request() {
-        let ref = svc.http_session_request(this.ref);
-        return new SystemHttpRequest(ref);
     }
 }
 
