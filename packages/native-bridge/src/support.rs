@@ -1,118 +1,144 @@
 use neon::prelude::*;
+use neon::types::buffer::*;
 
-use neon::handle::Managed;
-use neon::types::buffer::TypedArray;
-use neon::types::function::CallOptions;
-
-use std::ops::Range;
+use std::cell::RefCell;
 use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::RwLock;
 
-pub type CallbackHandle = (Channel, Arc<Root<JsFunction>>);
+pub struct Delegate<T>(RwLock<Vec<(Arc<()>, Box<dyn Fn(T) + Send + Sync + 'static>)>>);
 
-pub struct CallbackList {
-    list: Mutex<Vec<CallbackHandle>>
-}
-
-impl CallbackList {
-    pub fn extract(&self) -> Vec<CallbackHandle> {
-        if let Ok(ref mut list) = self.list.lock() {
-            return list.clone();
-        }
-
-        Vec::new()
-    }
-
+impl<T> Delegate<T> {
     pub const fn new() -> Self {
-        Self {
-            list: Mutex::new(Vec::new())
-        }
-    }
-
-    pub fn add(&self, cx: &mut FunctionContext, f: Handle<JsFunction>) -> usize {
-        let tx = cx.channel();
-        let root = Arc::new(f.root(cx));
-        if let Ok(ref mut list) = self.list.lock() {
-            list.push((tx, root.clone()));
-        }
-
-        Arc::as_ptr(&root) as usize
-    }
-
-    pub fn remove(&self, ptr: usize) {
-        if let Ok(ref mut list) = self.list.lock() {
-            list.retain(|(_, x)| Arc::as_ptr(&x) as usize != ptr);
-        }
+        Self(RwLock::new(Vec::new()))
     }
 
     pub fn clear(&self) {
-        if let Ok(ref mut list) = self.list.lock() {
-            list.clear();
+        if let Ok(mut vec) = self.0.write() {
+            vec.clear();
         }
     }
 
-    pub fn notify(&self, value: &str) {
-        let name = String::from(value);
-        self.notify_with(move |cx, opts| opts.arg(cx.string(name.clone())));
-    }
-
-    pub fn notify_with<F>(&self, factory: F) where F: for<'a, 'b> Fn(&mut TaskContext<'a>, &'b mut CallOptions<'a>) -> &'b mut CallOptions<'a> + Sync + Send + 'static {
-        let arc = Arc::new(factory);
-        for (tx, root) in self.extract() {
-            let f = arc.clone();
-            tx.send(move |mut cx| {
-                let cb = (*root).to_inner(&mut cx);
-                let mut opts = cb.call_with(&mut cx);
-                (*f)(&mut cx, &mut opts).exec(&mut cx)?;
-
-                Ok(())
-            });
+    pub fn push<D>(&self, d: D) -> Arc<()> where D: Fn(T) + Send + Sync + 'static {
+        let arc = Arc::new(());
+        if let Ok(mut vec) = self.0.write() {
+            vec.push((arc.clone(), Box::new(d)));
         }
-    }
-}
 
-pub struct JsArc<T>(Arc<T>);
-pub type JsArcResult<'a, T> = JsResult<'a, JsBox<JsArc<T>>>;
-
-impl<T> JsArc<T> where T: Send + 'static {
-    pub fn export<'a>(cx: &mut FunctionContext<'a>, value: T) -> JsArcResult<'a, T> {
-        Ok(cx.boxed(Self(Arc::new(value))))
+        return arc;
     }
 
-    pub fn import(cx: &mut FunctionContext, i: i32) -> NeonResult<Arc<T>> {
-        let h = cx.argument::<JsBox<JsArc<T>>>(i)?;
-        Ok((**h).0.clone())
-    }
-}
-
-impl<T> Finalize for JsArc<T> {
-
-}
-
-unsafe impl<T> Send for JsArc<T> {
-
-}
-
-pub fn arg_at<'a, T: Managed + Value>(cx: &mut FunctionContext<'a>, iter: &mut Range<i32>) -> NeonResult<Handle<'a, T>> {
-    let i = iter.next().unwrap_or(cx.len());
-    let arg = cx.argument::<T>(i)?;
-
-    return Ok(arg);
-}
-
-pub fn arg_ptr_at<'a>(cx: &mut FunctionContext<'a>, block: &Handle<'a, JsBuffer>, iter: &mut Range<i32>) -> NeonResult<(*const u8, usize)> {
-    let arg = arg_at::<JsNumber>(cx, iter)?.value(cx) as usize;
-    let len = arg_at::<JsNumber>(cx, iter)?.value(cx) as usize;
-    let ptr = block.as_slice(cx)[arg..arg].as_ptr();
-    Ok((ptr, len))
-}
-
-pub fn opt_arg_at<'a, T: Managed + Value>(cx: &mut FunctionContext<'a>, i: i32) -> NeonResult<Option<Handle<'a, T>>> {
-    if let Some(arg) = cx.argument_opt(i) {
-        if arg.downcast::<JsUndefined, FunctionContext>(cx).is_err() {
-            return Ok(Some(arg.downcast_or_throw::<T, FunctionContext>(cx)?));
+    pub fn delete(&self, arc: Arc<()>) {
+        if let Ok(mut vec) = self.0.write() {
+            vec.retain(move |x| !Arc::ptr_eq(&x.0, &arc));
         }
     }
 
-    Ok(None)
+    pub fn send<'a, F, X>(&self, f: F) -> bool where F: Fn() -> X, X: Into<T> {
+        if let Ok(vec) = self.0.read() {
+            for d in vec.iter() {
+                d.1(f().into());
+            }
+
+            return true;
+        }
+
+        false
+    }
+}
+
+pub trait FunctionContextEx<'a> {
+    fn arg_bool(&mut self, i: &mut i32) -> NeonResult<bool>;
+    fn arg_buffer(&mut self, i: &mut i32) -> JsResult<'a, JsBuffer>;
+    fn arg_string(&mut self, i: &mut i32) -> NeonResult<String>;
+
+    fn arg_u16(&mut self, i: &mut i32) -> NeonResult<u16>;
+    fn arg_i32(&mut self, i: &mut i32) -> NeonResult<i32>;
+    fn arg_u32(&mut self, i: &mut i32) -> NeonResult<u32>;
+    fn arg_u64(&mut self, i: &mut i32) -> NeonResult<u64>;
+    fn arg_ptr(&mut self, i: &mut i32, block: &Handle<'a, JsBuffer>) -> NeonResult<(*const u8, usize)>;
+
+    fn export<T: Finalize + Send + Sync + 'static>(&mut self, value: T) -> Handle<'a, JsValue>;
+    fn import<T: Finalize + Send + Sync + 'static>(&mut self, i: &mut i32) -> NeonResult<Arc<T>>;
+    fn dispose<T: Finalize + Send + Sync + 'static>(&mut self, i: i32) -> NeonResult<()>;
+}
+
+impl<'a> FunctionContextEx<'a> for FunctionContext<'a> {
+    fn arg_bool(&mut self, i: &mut i32) -> NeonResult<bool> {
+        let result = self.argument::<JsBoolean>(*i)?.value(self);
+        *i += 1;
+
+        Ok(result)
+    }
+
+    fn arg_buffer(&mut self, i: &mut i32) -> JsResult<'a, JsBuffer> {
+        let result = self.argument::<JsBuffer>(*i)?;
+        *i += 1;
+
+        Ok(result)
+    }
+
+    fn arg_string(&mut self, i: &mut i32) -> NeonResult<String> {
+        let result = self.argument::<JsString>(*i)?.value(self);
+        *i += 1;
+
+        Ok(result)
+    }
+
+    fn arg_u16(&mut self, i: &mut i32) -> NeonResult<u16> {
+        let result = self.argument::<JsNumber>(*i)?.value(self);
+        *i += 1;
+
+        Ok(result as u16)
+    }
+
+    fn arg_i32(&mut self, i: &mut i32) -> NeonResult<i32> {
+        let result = self.argument::<JsNumber>(*i)?.value(self);
+        *i += 1;
+
+        Ok(result as i32)
+    }
+
+    fn arg_u32(&mut self, i: &mut i32) -> NeonResult<u32> {
+        let result = self.argument::<JsNumber>(*i)?.value(self);
+        *i += 1;
+
+        Ok(result as u32)
+    }
+
+    fn arg_u64(&mut self, i: &mut i32) -> NeonResult<u64> {
+        let result = self.argument::<JsBox<u64>>(*i)?;
+        *i += 1;
+
+        Ok(**result)
+    }
+
+    fn arg_ptr(&mut self, i: &mut i32, block: &Handle<'a, JsBuffer>) -> NeonResult<(*const u8, usize)> {
+        let off = self.arg_u32(i)? as usize;
+        let len = self.arg_u32(i)? as usize;
+        let ptr = block.as_slice(self)[off..off].as_ptr();
+        Ok((ptr, len))
+    }
+
+    fn export<T: Finalize + Send + Sync + 'static>(&mut self, value: T) -> Handle<'a, JsValue> {
+        let result = self.boxed(RefCell::new(Some(Arc::new(value))));
+        result.upcast()
+    }
+
+    fn import<T: Finalize + Send + Sync + 'static>(&mut self, i: &mut i32) -> NeonResult<Arc<T>> {
+        let result = self.argument::<JsBox<RefCell<Option<Arc<T>>>>>(*i)?;
+        *i += 1;
+
+        if let Some(arc) = (**result).borrow().as_ref() {
+            return Ok(arc.clone());
+        }
+
+        self.throw_type_error("Object disposed.")
+    }
+
+    fn dispose<T: Finalize + Send + Sync + 'static>(&mut self, i: i32) -> NeonResult<()> {
+        let result = self.argument::<JsBox<RefCell<Option<Arc<T>>>>>(i)?;
+        (**result).replace(None);
+
+        Ok(())
+    }
 }

@@ -470,18 +470,31 @@ class RelayHelper {
         });
 
         if (await both) {
+            this.teardown();
             await native.cancel();
-            this.destroy();
         } else {
             this.cleanup();
+            native.ok();
         }
     }
 
+    async cancel() {
+        const { native } = this;
+        this.teardown();
+        await native.cancel();
+    }
+
+    destroy() {
+        const { native } = this;
+        this.teardown();
+        native?.close();
+    }
+
     cleanup() {
-        this.native?.close();
         this.request?.removeAllListeners();
         this.response?.removeAllListeners();
         this.source?.removeAllListeners();
+        this.source?.destroy();
 
         Object.assign(this, {
             native: undefined,
@@ -492,8 +505,7 @@ class RelayHelper {
         });
     }
 
-    destroy() {
-        this.native?.close();
+    teardown() {
         this.request?.removeAllListeners();
         this.request?.destroy();
         this.response?.removeAllListeners();
@@ -519,24 +531,17 @@ export class SystemHttpManager extends EventEmitter {
 
     public async process(name: string) {
         const { requests } = this;
-        while (true) {
-            const native = SystemHttpRequest.create(name);
-            const helper = new RelayHelper(native);
+        const native = SystemHttpRequest.create(name);
+        while (!native.done()) {
+            const next = native.clone();
+            const helper = new RelayHelper(next);
             requests.add(helper);
 
-            const result = await native.receive();
-            if (result === false) {
-                requests.delete(helper);
-                helper.destroy();
-
-                break;
-            }
-
+            const result = await next.receive();
             if (result === true) {
-                helper.relay(this).then(() => requests.delete(helper));
+                helper.relay(this).finally(() => requests.delete(helper));
             } else {
-                await native.cancel();
-                helper.destroy();
+                helper.cancel().finally(() => requests.delete(helper));
             }
         }
     }
@@ -555,7 +560,7 @@ export class SystemHttpManager extends EventEmitter {
         return true;
     }
 
-    close() {
+    destroy() {
         this.sessions.forEach(x => x.close());
         this.sessions.clear();
 

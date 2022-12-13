@@ -1,11 +1,10 @@
 use neon::prelude::*;
 
-use crate::win32::HandleRef;
-
 use super::support::*;
+use super::win32::*;
 
 use std::ffi::*;
-//use std::ptr::null_mut;
+use std::ptr::copy;
 use std::slice::*;
 
 use windows::core::*;
@@ -23,17 +22,30 @@ struct Resolver {
 impl Resolver {
     fn new() -> Self {
         Self {
-            name: Vec::with_capacity(1),
-            domain: Vec::with_capacity(1),
+            name: Vec::with_capacity(24),
+            domain: Vec::with_capacity(24),
         }
     }
 
-    unsafe fn append<'a>(&mut self, cx: &mut FunctionContext<'a>, list: &Handle<JsArray>, psid: PSID) -> NeonResult<()> {
-        if let Some(value) = self.resolve(psid) {
-            let result = cx.string(value);
-            list.set(cx, 2, result)?;
-        }
+    unsafe fn append<'a>(mut self, cx: &mut FunctionContext<'a>, list: &Handle<JsArray>, psid: PSID) -> NeonResult<()> {
+        let mut vec = Vec::<u8>::with_capacity(GetLengthSid(psid) as usize);
+        copy(psid.0 as *const u8, vec.as_mut_ptr(), vec.capacity());
 
+        let builder = cx.task(move || {
+            let psid = PSID(vec.as_mut_ptr() as *mut c_void);
+            if let Some(value) = self.resolve(psid) {
+                return value;                
+            }
+    
+            drop(vec);
+            String::from("")
+        });
+
+        let promise = builder.promise(move |mut cx, value| {
+            Ok(cx.string(value))
+        });
+
+        list.set(cx, 2, promise)?;
         Ok(())
     }
 
@@ -96,10 +108,13 @@ unsafe fn add_type_sid<'a>(cx: &mut FunctionContext<'a>, name: Handle<'a, JsStri
 }
 
 fn user_claims(mut cx: FunctionContext) -> JsResult<JsArray> {
+    cx.export(());
+
     unsafe {
+        let mut i = 0;
         let mut handle = HANDLE(-1);
-        let method = cx.argument::<JsString>(0)?.value(&mut cx);
-        let resolve = cx.argument::<JsBoolean>(1)?.value(&mut cx);
+        let method = cx.arg_string(&mut i)?;
+        let resolve = cx.arg_bool(&mut i)?;
         if method.eq("viaProcess") {
             let process = GetCurrentProcess();
             let result = OpenProcessToken(process, TOKEN_QUERY, &mut handle);
@@ -125,11 +140,10 @@ fn user_claims(mut cx: FunctionContext) -> JsResult<JsArray> {
         }
 
         if method.eq("viaToken") {
-            let arc = JsArc::<HandleRef>::import(&mut cx, 2)?;
+            let arc = cx.import::<HandleRef>(&mut i)?;
             handle = (*arc).0;
         }
 
-        let mut resolver = Resolver::new();
         let js_result = cx.empty_array();
         let js_user = cx.string("user");
         let js_group = cx.string("group");
@@ -156,6 +170,7 @@ fn user_claims(mut cx: FunctionContext) -> JsResult<JsArray> {
                     i += 1;
 
                     if resolve {
+                        let resolver = Resolver::new();
                         resolver.append(&mut cx, &list, user.User.Sid)?;
                     }
                 }
@@ -179,6 +194,7 @@ fn user_claims(mut cx: FunctionContext) -> JsResult<JsArray> {
                         i += 1;
 
                         if resolve {
+                            let resolver = Resolver::new();
                             resolver.append(&mut cx, &list, group.Sid)?;
                         }
                     }
@@ -191,6 +207,7 @@ fn user_claims(mut cx: FunctionContext) -> JsResult<JsArray> {
                         i += 1;
 
                         if resolve {
+                            let resolver = Resolver::new();
                             resolver.append(&mut cx, &list, group.Sid)?;
                         }
                     }

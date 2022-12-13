@@ -239,11 +239,9 @@ function toBuffer(data: string | Buffer) {
     return typeof data === "string" ? Buffer.from(data) : data;
 }
 
-let init = false;
-
 export class SystemHttpRequest {
-    readonly id: unknown;
-    readonly ref: unknown;
+    readonly id: [unknown];
+    readonly ref: [unknown];
     readonly name: string;
 
     readonly request: RequestData = Object.create(protoRequest);
@@ -257,30 +255,34 @@ export class SystemHttpRequest {
     opaque = false;
     speedy = false;
 
-    constructor(ref: unknown, name: string) {
+    constructor(ref: [unknown], name: string) {
         this.done = this.done.bind(this);
+        this.id = [undefined];
         this.ref = ref;
         this.name = name;
     }
 
     static create(name: string) {
         svc = NodePlugin.setup();
-        init || svc.http_init(false, true);
-        init = true;
 
         const ref = svc.http_request_create(name);
-        return new this(ref, name);
+        return new this([ref], name);
+    }
+
+    clone() {
+        return new SystemHttpRequest(this.ref, this.name);
     }
 
     done() {
-        return !this.ref;
+        return !this.ref[0];
     }
 
     close() {
-        const { ref } = this;
-        if (ref) {
-            Object.assign(this, { id: undefined, ref: undefined });
-            svc.http_request_close(ref);
+        const { ref, id } = this;
+        id.shift();
+
+        if (ref[0]) {
+            svc.http_session_close(ref.pop());
         }
     }
 
@@ -298,34 +300,38 @@ export class SystemHttpRequest {
             addBlockHeader(block, name, value);
         }
         
-        svc.http_request_push(this.ref, this.id, ...renderBlock(block));
+        svc.http_request_push(this.handle(), this.id[0], ...renderBlock(block));
     }
 
-    async cancel() {
-        const { id, ref } = this;
-        if (id && ref) {
-            Object.assign(this, { id: undefined, ref: undefined });
-            
-            const result = await svc.http_request_cancel(ref, id) as number;
-            svc.http_request_close(ref);
-
-            return result;
+    handle() {
+        const { ref } = this;
+        if (ref[0]) {
+            return ref[0];
         }
 
         return undefined;
     }
 
-    async receive(size?: number) {
-        const { knownHeaders, unknownHeaders, id, ...rest } = await svc.http_request_receive(this.ref, size);
-        if (rest.code === 995) {
-            return false;
+    ok() {
+        this.id.pop();
+    }
+
+    async cancel() {
+        const { id, ref } = this;
+        if (id[0] && ref[0]) {
+            return await svc.http_request_cancel(ref[0], id.pop()) as number;
         }
 
+        return 0;
+    }
+
+    async receive(size = 0) {
+        const { knownHeaders, unknownHeaders, id, ...rest } = await svc.http_request_receive(this.handle(), size);
         if (rest.code !== 0) {
             return rest.code as number;
         }
 
-        Object.assign(this, { id });
+        this.id[0] = id;
 
         if (rest.more) {
             return 0;
@@ -358,8 +364,9 @@ export class SystemHttpRequest {
         return true;
     }
 
-    async receiveData(size?: number) {
-        const result = await svc.http_request_receive_data(this.ref, this.id, size);
+    async receiveData(size = 0) {
+        const data = Buffer.alloc(size > 0 ? size : 4096)
+        const result = await svc.http_request_receive_data(this.handle(), this.id[0], data);
         if (result.eof) {
             this.readable = false;
             return undefined;
@@ -369,7 +376,7 @@ export class SystemHttpRequest {
             return result.code as number;
         }
 
-        return Buffer.from(result.data, 0, result.size);
+        return data.subarray(0, result.size);
     }
 
     // @ts-ignore
@@ -404,8 +411,8 @@ export class SystemHttpRequest {
         }
 
         // console.log(renderBlock(block));
-        const result = await svc.http_request_send(this.ref, this.id, ...renderBlock(block));
-        return result as number;
+        const { code } = await svc.http_request_send(this.handle(), this.id[0], ...renderBlock(block));
+        return code as number;
     }
 
     // @ts-ignore
@@ -454,8 +461,8 @@ export class SystemHttpRequest {
         }
 
         // console.log(renderBlock(block));
-        const result = await svc.http_request_send_data(this.ref, this.id, chunks.length, ...chunks, ...renderBlock(block));
-        return result as number;
+        const { code } = await svc.http_request_send_data(this.handle(), this.id[0], chunks.length, ...chunks, ...renderBlock(block));
+        return code as number;
     }
 }
 

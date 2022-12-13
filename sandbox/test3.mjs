@@ -23,6 +23,8 @@ const pin = new Set();
 pin.add(manager);
 
 const server = http.createServer();
+server.listen(9580, "localhost");
+
 manager.on("handoff", x => server.emit("connection", x));
 
 server.on("request", (req, res) => {
@@ -44,7 +46,7 @@ server.on("request", (req, res) => {
     //res.end();
 });
 
-const agent = new Agent({ keepAlive: true, noDelay: true })
+const agent = new Agent({ keepAlive: true });
 
 async function test(ms) {
     await new Promise(x => setTimeout(x, ms));
@@ -66,5 +68,39 @@ async function test(ms) {
     req.end();
 }
 
+async function test2(ms) {
+    await new Promise(x => setTimeout(x, ms));
+    console.log("--- test2");
+
+    const freeSockets = agent.freeSockets;
+    agent.freeSockets = Object.create(null);
+
+    let socket;
+    for (const [key, sockets] of Object.entries(freeSockets)) {
+        if (Array.isArray(sockets)) {
+            socket = sockets[0];
+        }
+    }
+
+    function send() {
+        socket.write("POST / HTTP/1.1\r\n");
+        socket.write("Host: localhost\r\n");
+        socket.write("Connection: keep-slive\r\n");
+        socket.write("Content-Length: 4\r\n");
+        socket.write("\r\n");
+
+        socket.write("test");
+    }
+
+    if (socket) {
+        send();
+        send();
+
+        socket.on("data", x => console.log("--- x", JSON.stringify(x.toString())));
+    }
+}
+
 test(300);
-test(600);
+test(1300);
+
+//test2(1300);

@@ -21,6 +21,7 @@ async function receive_it() {
     console.log("--- state", req);
 
     console.log("--- receive data", await req.receiveData());
+    await new Promise(x => setTimeout(x, 300));
     console.log("--- receive data", await req.receiveData());
 
     //req.disconnect = true;

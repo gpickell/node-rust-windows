@@ -1,19 +1,21 @@
+use super::support::*;
 use super::win32::*;
+
+use neon::prelude::*;
+use neon::types::buffer::*;
+
+use core::ptr::*;
 
 use windows::core::PCSTR;
 use windows::core::PCWSTR;
 
-use windows::Win32::System::IO::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Networking::HttpServer::*;
 
-use core::ptr::*;
 use std::ffi::*;
-use std::slice::from_raw_parts;
+use std::slice::from_raw_parts_mut;
 use std::mem;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering::Relaxed;
 
 #[allow(non_upper_case_globals)]
 static ver_init: HTTPAPI_VERSION = HTTPAPI_VERSION {
@@ -27,31 +29,41 @@ unsafe impl<T> Send for SendRef<T> {
 
 }
 
+unsafe impl<T> Sync for SendRef<T> {
+
+}
+
 struct Session {
-    active: AtomicBool,
     queue: HANDLE,
     session: u64,
     urls: u64,
 }
 
+impl Finalize for Session {}
+
 impl Session {
-    pub fn create(name: &str) -> Result<Session, WinError> {
+    pub fn create(name: &str) -> Result<Session, (&str, u32)> {
         unsafe {
             let flags = HTTP_CREATE_REQUEST_QUEUE_FLAG_CONTROLLER;
             let name_wide = wide(name);
             let name_ptr = wide_ptr(&name_wide);
 
+            let err = HttpInitialize(ver_init, HTTP_INITIALIZE_SERVER, None);
+            if err != 0 {
+                return Err(("HttpInitialize", err));
+            }
+
             let mut session: u64 = 0;
             let err = HttpCreateServerSession(ver_init, &mut session, 0);
             if err != 0 {
-                return Err(WinError("HttpCreateServerSession", err));
+                return Err(("HttpCreateServerSession", err));
             }
 
             let mut urls: u64 = 0;
             let err = HttpCreateUrlGroup(session, &mut urls, 0);
             if err != 0 {
                 HttpCloseServerSession(session);
-                return Err(WinError("HttpCreateUrlGroup", err));
+                return Err(("HttpCreateUrlGroup", err));
             }
 
             let mut queue = HANDLE(-1);
@@ -59,7 +71,7 @@ impl Session {
             if err != 0 {
                 HttpCloseServerSession(session);
                 HttpCloseUrlGroup(urls);
-                return Err(WinError("HttpCreateRequestQueue", err));
+                return Err(("HttpCreateRequestQueue", err));
             }
 
             let prop = HttpServerBindingProperty;
@@ -76,129 +88,149 @@ impl Session {
                 HttpCloseUrlGroup(urls);
                 HttpCloseServerSession(session);
                 CloseHandle(queue);
-                return Err(WinError("HttpSetUrlGroupProperty", err));
+                return Err(("HttpSetUrlGroupProperty", err));
             }
    
-            Ok(Self { active: AtomicBool::new(false), queue, session, urls })
+            Ok(Self { queue, session, urls })
         }
     }
 
-    pub fn listen(&self, url: &str) -> Result<(), WinError> {
+    pub fn listen(self: &Arc<Self>, url: &str) -> Result<(), (&str, u32)> {
         unsafe {
             let url_wide = wide(url);
             let err = HttpAddUrlToUrlGroup(self.urls, wide_ptr(&url_wide), 0, 0);
             if err != 0 {
-                return Err(WinError("HttpSetUrlGroupProperty", err));
+                return Err(("HttpAddUrlToUrlGroup", err));
             }
     
             Ok(())
-        }
-    }
-
-    pub fn close(&self) {
-        if !self.active.swap(true, Relaxed) {
-            unsafe {
-                HttpCloseUrlGroup(self.urls);
-                HttpCloseServerSession(self.session);
-                CloseHandle(self.queue);
-            }
         }
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        self.close();
+        unsafe {
+            HttpCloseUrlGroup(self.urls);
+            HttpCloseServerSession(self.session);
+            CloseHandle(self.queue);
+        }
     }
 }
 
 struct Request {
     arc: Arc<HandleRef>,
-    cancel_all: AtomicBool,
 }
 
+impl Finalize for Request {}
+
 impl Request {
-    pub fn new(h: HANDLE) -> Self {
-        Self {
-            arc: HandleRef::new(h),
-            cancel_all: AtomicBool::new(false),
-        }
-    }
-
-    unsafe fn cancel_io_maybe(&self, h: HANDLE) {
-        if self.cancel_all.load(Relaxed) {
-            CancelIoEx(h, None);
-        }
-    }
-
-    pub async fn cancel(&self, id: u64) -> OverlappedResult<()> {
+    pub fn create(name: &str) -> Result<Self, (&str, u32)> {
         unsafe {
-            let arc = self.arc.clone();
-            let mut helper = OverlappedHelper::new();
-            let mut result = OverlappedResult::<()>::new(Auto(0), 0);
-            let err = HttpCancelHttpRequest(arc.0, id, helper.as_mut_ptr());
-            self.cancel_io_maybe(arc.0);
-            result.finish(arc.0, err, &mut helper).await;
+            let name_wide = wide(&name);
+            let name_ptr = wide_ptr(&name_wide);
 
-            result
+            let err = HttpInitialize(ver_init, HTTP_INITIALIZE_SERVER, None);
+            if err != 0 {
+                return Err(("HttpInitialize", err));
+            }
+
+            let mut queue = HANDLE(-1);
+            let flags = HTTP_CREATE_REQUEST_QUEUE_FLAG_OPEN_EXISTING;
+            let err = HttpCreateRequestQueue(ver_init, name_ptr, null_mut(), flags, &mut queue);
+            if err != 0 {
+                return Err(("HttpCreateRequestQueue", err));
+            }
+
+            if !bind_io(queue) {
+                CloseHandle(queue);
+                let err = GetLastError().0;
+                return Err(("BindIoCompletionCallback", err));                
+            }
+
+            Ok(Self { arc: HandleRef::new(queue) })
         }
     }
 
-    pub async fn receive(&self, id: u64, target: Buffer) -> OverlappedResult<HTTP_REQUEST_V2> {
+    pub fn cancel<F>(self: &Arc<Self>, id: u64, f: F) where F: FnOnce(u32) + Send + 'static {
         unsafe {
-            let arc = self.arc.clone();
-            let mut helper = OverlappedHelper::new();
-            let mut result = OverlappedResult::<HTTP_REQUEST_V2>::new(target, 1024);
+            let h = &self.arc;
+            let o = h.wrap(move |err, _| f(err));
+            let err = HttpCancelHttpRequest(h.0, id, o);
+            h.cleanup(o, err);
+        }
+    }
+
+    pub fn receive<F>(self: &Arc<Self>, mut size: u32, f: F) where F: FnOnce(u32, Vec<u8>, &'static SendRef<HTTP_REQUEST_V2>) + Send + 'static {
+        unsafe {
+            if size < 1 {
+                size = 4096;
+            }
+
+            if size < 2048 { 
+                size = 2048;
+            }
+
+            let h0 = &self.arc;
+            let h1 = h0.clone();
+            let vec = Vec::<u8>::with_capacity(size as usize);
+            let ptr = vec.as_ptr() as *mut HTTP_REQUEST_V2;
             let flags = HTTP_RECEIVE_HTTP_REQUEST_FLAGS(0);
-            let err = HttpReceiveHttpRequest(arc.0, id, flags, result.as_mut_ptr(), result.capacity(), None, helper.as_mut_ptr());
-            self.cancel_io_maybe(arc.0);
-            result.finish(arc.0, err, &mut helper).await;
+            let o = h0.wrap(move |err, size| {
+                let result = &*(vec.as_ptr() as *const SendRef<HTTP_REQUEST_V2>);
+                if err == ERROR_MORE_DATA.0 {
+                    let id = result.0.Base.RequestId;
+                    let vec = Vec::<u8>::with_capacity(size as usize);
+                    let ptr = vec.as_ptr() as *mut HTTP_REQUEST_V2;
+                    let o = h1.wrap(move |err, _| {
+                        let result = &*(vec.as_ptr() as *const SendRef<HTTP_REQUEST_V2>);
+                        f(err, vec, result);
+                    });
 
-            result
+                    let err = HttpReceiveHttpRequest(h1.0, id, flags, ptr, size, None, o);
+                    h1.cleanup(o, err);
+                } else {
+                    f(err, vec, result);
+                }
+            });
+
+            let err = HttpReceiveHttpRequest(h0.0, 0, flags, ptr, size, None, o);
+            h0.cleanup(o, err);
         }
     }
 
-    pub async fn receive_data(&self, id: u64, target: Buffer) -> OverlappedResult<u8> {
+    pub fn receive_data<F>(self: &Arc<Self>, id: u64, slice: &mut [u8], f: F) where F: FnOnce(u32, u32) + Send + 'static {
         unsafe {
-            let arc = self.arc.clone();
-            let mut helper = OverlappedHelper::new();
-            let mut result = OverlappedResult::<u8>::new(target, 256);
-            let err = HttpReceiveRequestEntityBody(arc.0, id, 0, result.as_mut_ptr() as *mut c_void, result.capacity(), None, helper.as_mut_ptr());
-            self.cancel_io_maybe(arc.0);
-            result.finish(arc.0, err, &mut helper).await;
-
-            result
+            let h = &self.arc;
+            let o = h.wrap(f);
+            let err = HttpReceiveRequestEntityBody(h.0, id, 0, slice.as_mut_ptr() as *mut c_void, slice.len() as u32, None, o);
+            h.cleanup(o, err);
         }
     }
 
-    pub async fn send(&self, id: u64, flags: u32, source: SendRef<*mut HTTP_RESPONSE_V2>) -> OverlappedResult<u32> {
+    pub fn send<F>(self: &Arc<Self>, id: u64, flags: u32, response: &mut HTTP_RESPONSE_V2, f: F) where F: FnOnce(u32, u32) + Send + 'static {
         unsafe {
-            let arc = self.arc.clone();
-            let mut helper = OverlappedHelper::new();
-            let mut result = OverlappedResult::<u32>::new(Auto(0), 4);
-            let err = HttpSendHttpResponse(arc.0, id, flags, source.0, null_mut(), result.as_mut_ptr(), None, 0, helper.as_mut_ptr(), null_mut());
-            self.cancel_io_maybe(arc.0);
-            result.finish(arc.0, err, &mut helper).await;
-
-            result
+            let h = &self.arc;
+            let mut size = Box::new(0u32);
+            let size_ptr = size.as_mut() as *mut u32;
+            let o = h.wrap(move |err, _| f(err, *size));
+            let err = HttpSendHttpResponse(h.0, id, flags, response, null_mut(), size_ptr, None, 0, o, null_mut());
+            h.cleanup(o, err);
         }
     }
 
-    pub async fn send_data(&self, id: u64, flags: u32, source: SendRef<*mut HTTP_DATA_CHUNK>, count: u16) -> OverlappedResult<u32> {
+    pub fn send_data<F>(self: &Arc<Self>, id: u64, flags: u32, chunks: &mut [HTTP_DATA_CHUNK], f: F) where F: FnOnce(u32, u32) + Send + 'static {
         unsafe {
-            let arc = self.arc.clone();
-            let mut helper = OverlappedHelper::new();
-            let mut result = OverlappedResult::<u32>::new(Auto(0), 4);
-            let slice = SendRef(from_raw_parts(source.0, count as usize));
-            let err = HttpSendResponseEntityBody(arc.0, id, flags, Some(slice.0), result.as_mut_ptr(), None, 0, helper.as_mut_ptr(), null_mut());
-            self.cancel_io_maybe(arc.0);
-            result.finish(arc.0, err, &mut helper).await;
-
-            result
+            let h = &self.arc;
+            let mut size = Box::new(0u32);
+            let size_ptr = size.as_mut() as *mut u32;
+            let o = h.wrap(move |err, _| f(err, *size));
+            let err = HttpSendResponseEntityBody(h.0, id, flags, Some(chunks), size_ptr, None, 0, o, null_mut());
+            h.cleanup(o, err);
         }
     }
 
-    pub fn push(&self, id: u64, verb: i32, path: *const u16, query: *const u8, headers: *const HTTP_REQUEST_HEADERS ) -> Result<(), WinError> {
+    pub fn push(&self, id: u64, verb: i32, path: *const u16, query: *const u8, headers: *const HTTP_REQUEST_HEADERS ) -> Result<(), (&str, u32)> {
         unsafe {
             let arc = self.arc.clone();
             let mut query_opt: Option<PCSTR> = None;
@@ -209,106 +241,80 @@ impl Request {
 
             let err = HttpDeclarePush(arc.0, id, HTTP_VERB(verb), PCWSTR(path), query_opt, Some(headers));
             if err != 0 {
-                return Err(WinError("HttpDeclarePush", err));
+                return Err(("HttpDeclarePush", err));
             }
 
             Ok(())
-        }
-    }
-    
-    pub fn close(&self) {
-        self.cancel_all.store(true, Relaxed);
-
-        unsafe {
-            CancelIoEx(self.arc.0, None);
         }
     }
 }
 
 impl Drop for Request {
     fn drop(&mut self) {
-        self.close();
+        self.arc.cancel();
     }
 }
 
-use Buffer::*;
-
-use neon::prelude::*;
-use super::support::*;
-use neon::types::buffer::TypedArray;
-
-fn http_session_create(mut cx: FunctionContext) -> JsArcResult<Session> {
-    let name = cx.argument::<JsString>(0)?.value(&mut cx);
+fn http_session_create(mut cx: FunctionContext) -> JsResult<JsValue> {
+    let mut i = 0;
+    let name = cx.arg_string(&mut i)?;
     match Session::create(&name) {
-        Ok(session) => JsArc::export(&mut cx, session),
-        Err(err) => cx.throw_type_error(format!("{}", err))
+        Ok(session) => Ok(cx.export(session)),
+        Err((hint, err)) => cx.throw_type_error(format!("{}: {}", hint, err))
     }
 }
 
 fn http_session_listen(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let arc = JsArc::<Session>::import(&mut cx, 0)?;
-    let url_arg = cx.argument::<JsString>(1)?;
-    let url = url_arg.value(&mut cx);
+    let mut i = 0;
+    let arc = cx.import::<Session>(&mut i)?;
+    let url = cx.arg_string(&mut i)?;
     match arc.listen(&url) {
         Ok(()) => Ok(cx.undefined()),
-        Err(err) => cx.throw_type_error(format!("{}", err))
+        Err((hint, err)) => cx.throw_type_error(format!("{}: {}", hint, err))
     } 
 }
 
 fn http_session_close(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let arc = JsArc::<Session>::import(&mut cx, 0)?;
-    arc.close();
-
+    cx.dispose::<Session>(0)?;
     Ok(cx.undefined())
 }
 
 fn http_request_cancel(mut cx: FunctionContext) -> JsResult<JsPromise> {
-    let arc = JsArc::<Request>::import(&mut cx, 0)?;
-    let id = **cx.argument::<JsBox<u64>>(1)?;
+    let mut i = 0;
+    let arc = cx.import::<Request>(&mut i)?;
+    let id = cx.arg_u64(&mut i)?;
     let tx = cx.channel();
     let (def, promise) = cx.promise();
-    let func = async move {
-        let result = arc.cancel(id).await;
+    arc.cancel(id, move |err| {
         def.settle_with(&tx, move |mut cx| {
-            Ok(cx.number(result.err))
+            Ok(cx.number(err))
         });
-    };
-    
-    tasks().spawn_ok(func);
+    });
+
     Ok(promise)
 }
 
 fn http_request_receive(mut cx: FunctionContext) -> JsResult<JsPromise> {
-    let mut size = 4096u32;
-    let arc = JsArc::<Request>::import(&mut cx, 0)?;
-    if let Some(arg) = opt_arg_at::<JsNumber>(&mut cx, 1)? {
-        size = arg.value(&mut cx) as u32;
-    }
-           
+    let mut i = 0;
+    let arc = cx.import::<Request>(&mut i)?;
+    let size = cx.arg_u32(&mut i)?;
     let tx = cx.channel();
     let (def, promise) = cx.promise();
-    let func = async move {
-        let mut tmp = arc.receive(0, Auto(size)).await;
-        if tmp.more {
-            let id = tmp.as_ref().Base.RequestId;
-            tmp = arc.receive(id, Auto(tmp.size)).await;
-        }
-
-        let result = tmp;
+    arc.receive(size, move |err, vec, result| {
         def.settle_with(&tx, move |mut cx| {
-            let info = &result.as_ref().Base;
+            let info = &result.0.Base;
             let obj = cx.empty_object();
-            let js_err = cx.number(result.err);
+            let js_err = cx.number(err);
             obj.set(&mut cx, "code", js_err)?;
 
-            if result.err != 0 {
+            if err != 0 && err != ERROR_MORE_DATA.0 {
                 return Ok(obj);
             }
 
             let js_id = cx.boxed(info.RequestId);
             obj.set(&mut cx, "id", js_id)?;
 
-            if result.more {
+            if err != 0 {
                 return Ok(obj);
             }
 
@@ -378,72 +384,48 @@ fn http_request_receive(mut cx: FunctionContext) -> JsResult<JsPromise> {
                 }
             }
 
+            drop(vec);
             Ok(obj)
         });
-    };
-
-    tasks().spawn_ok(func);
+    });
+    
     Ok(promise)
 }
 
 fn http_request_receive_data(mut cx: FunctionContext) -> JsResult<JsPromise> {
-    let mut size = 4096u32;
-    let arc = JsArc::<Request>::import(&mut cx, 0)?;
-    let id = **cx.argument::<JsBox<u64>>(1)?;
-    if let Some(arg) = opt_arg_at::<JsNumber>(&mut cx, 2)? {
-        size = arg.value(&mut cx) as u32;
-    }
-
+    let mut i = 0;
+    let arc = cx.import::<Request>(&mut i)?;
+    let id = cx.arg_u64(&mut i)?;
+    let mut buf = cx.arg_buffer(&mut i)?;
+    let root = buf.root(&mut cx);
     let tx = cx.channel();
-    let mut data = cx.array_buffer(size as usize)?;
-    let root = data.root(&mut cx);
-    let slice = data.as_mut_slice(&mut cx);
-    let target = Slice(slice.as_mut_ptr(), slice.len() as u32);
     let (def, promise) = cx.promise();
-    let func = async move {
-        let result = arc.receive_data(id, target).await;
+    let slice = buf.as_mut_slice(&mut cx);
+    arc.receive_data(id, slice, move |err, size| {
+        drop(root);
+        
         def.settle_with(&tx, move |mut cx| {
             let obj = cx.empty_object();
-            let js_err = cx.number(result.err);
+            let js_err = cx.number(err);
             obj.set(&mut cx, "code", js_err)?;
 
-            let js_eof = cx.boolean(result.err == ERROR_HANDLE_EOF.0);
-            obj.set(&mut cx, "eof", js_eof)?;
-
-            if result.err != 0 {
-                return Ok(obj);
-            }
-
-            let js_size = cx.number(result.size);
+            let js_size = cx.number(size);
             obj.set(&mut cx, "size", js_size)?;
 
-            let js_data = root.to_inner(&mut cx);
-            let slice = js_data.as_slice(&mut cx);
-            if slice.as_ptr() == result.as_ptr() {
-                obj.set(&mut cx, "data", js_data)?;
-                return Ok(obj);
-            }
-
-            let mut js_data = cx.array_buffer(result.size as usize)?;
-            obj.set(&mut cx, "data", js_data)?;
-
-            unsafe {
-                let slice = js_data.as_mut_slice(&mut cx);
-                copy(result.as_ptr(), slice.as_mut_ptr(), result.size as usize);
-            }
+            let js_eof = cx.boolean(err == ERROR_HANDLE_EOF.0);
+            obj.set(&mut cx, "eof", js_eof)?;
 
             Ok(obj)
         });
-    };
+    });
 
-    tasks().spawn_ok(func);
     Ok(promise)
 }
 
 fn http_request_send(mut cx: FunctionContext) -> JsResult<JsPromise> {
-    let arc = JsArc::<Request>::import(&mut cx, 0)?;
-    let id = **cx.argument::<JsBox<u64>>(1)?;
-    let mut i = 2..cx.len();
+    let mut i = 0;
+    let arc = cx.import::<Request>(&mut i)?;
+    let id = cx.arg_u64(&mut i)?;
     let mut unknown = Vec::<HTTP_UNKNOWN_HEADER>::new();
     let mut response = Box::new(HTTP_RESPONSE_V2 {
         Base: HTTP_RESPONSE_V1 {
@@ -469,30 +451,30 @@ fn http_request_send(mut cx: FunctionContext) -> JsResult<JsPromise> {
         pResponseInfo: null_mut(),
     });
 
-    let block = arg_at::<JsBuffer>(&mut cx, &mut i)?;
+    let block = cx.arg_buffer(&mut i)?;
     let root = block.root(&mut cx);
     let base = &mut response.as_mut().Base;
-    let opaque = arg_at::<JsBoolean>(&mut cx, &mut i)?.value(&mut cx);
-    let more = arg_at::<JsBoolean>(&mut cx, &mut i)?.value(&mut cx);
-    let disconnect = arg_at::<JsBoolean>(&mut cx, &mut i)?.value(&mut cx);
-    let status = arg_at::<JsNumber>(&mut cx, &mut i)?.value(&mut cx);
-    let major = arg_at::<JsNumber>(&mut cx, &mut i)?.value(&mut cx);
-    let minor = arg_at::<JsNumber>(&mut cx, &mut i)?.value(&mut cx);
-    base.StatusCode = status as u16;
+    let opaque = cx.arg_bool(&mut i)?;
+    let more = cx.arg_bool(&mut i)?;
+    let disconnect = cx.arg_bool(&mut i)?;
+    let status = cx.arg_u16(&mut i)?;
+    let major = cx.arg_u16(&mut i)?;
+    let minor = cx.arg_u16(&mut i)?;
+    base.StatusCode = status;
     base.Version = HTTP_VERSION {
-        MajorVersion: major as u16,
-        MinorVersion: minor as u16,
+        MajorVersion: major,
+        MinorVersion: minor,
     };
 
-    let reason = arg_ptr_at(&mut cx, &block, &mut i)?;
+    let reason = cx.arg_ptr(&mut i, &block)?;
     base.ReasonLength = reason.1 as u16;
     base.pReason = PCSTR(reason.0);
 
-    while !i.is_empty() {
-        let id = arg_at::<JsNumber>(&mut cx, &mut i)?.value(&mut cx);
-        let value = arg_ptr_at(&mut cx, &block, &mut i)?;
-        if id < 0.0 {
-            let name = arg_ptr_at(&mut cx, &block, &mut i)?;
+    while i < cx.len() {
+        let id = cx.arg_i32(&mut i)?;
+        let value = cx.arg_ptr(&mut i, &block)?;
+        if id < 0 {
+            let name = cx.arg_ptr(&mut i, &block)?;
             unknown.push(HTTP_UNKNOWN_HEADER {
                 NameLength: name.1 as u16,
                 pName: PCSTR(name.0),
@@ -522,34 +504,42 @@ fn http_request_send(mut cx: FunctionContext) -> JsResult<JsPromise> {
     if disconnect {
         flags |= HTTP_SEND_RESPONSE_FLAG_DISCONNECT;
     }
-
-    let source = SendRef(response.as_mut() as *mut HTTP_RESPONSE_V2);
-    let transfer = SendRef((root, unknown, response));
+    
+    let ptr = response.as_mut() as *mut HTTP_RESPONSE_V2;
+    let transfer = SendRef((root, response, unknown));
     let tx = cx.channel();
     let (def, promise) = cx.promise();
-    let func = async move {
-        let result = arc.send(id, flags, source).await;
+    arc.send(id, flags, unsafe { &mut *ptr }, move |err, size| {
         drop(transfer);
 
         def.settle_with(&tx, move |mut cx| {
-            Ok(cx.number(result.err))
-        });
-    };
+            let obj = cx.empty_object();
+            let js_err = cx.number(err);
+            obj.set(&mut cx, "code", js_err)?;
 
-    tasks().spawn_ok(func);
+            let js_size = cx.number(size);
+            obj.set(&mut cx, "size", js_size)?;
+
+            let js_eof = cx.boolean(err == ERROR_HANDLE_EOF.0);
+            obj.set(&mut cx, "eof", js_eof)?;
+
+            Ok(obj)
+        });
+    });
+
     Ok(promise)
 }
 
 fn http_request_send_data(mut cx: FunctionContext) -> JsResult<JsPromise> {
-    let arc = JsArc::<Request>::import(&mut cx, 0)?;
-    let id = **cx.argument::<JsBox<u64>>(1)?;
-    let mut i = 2..cx.len();
-    let mut count = arg_at::<JsNumber>(&mut cx, &mut i)?.value(&mut cx) as u16;
+    let mut i = 0;
+    let arc = cx.import::<Request>(&mut i)?;
+    let id = cx.arg_u64(&mut i)?;
+    let mut count = cx.arg_u16(&mut i)?;
     let mut chunks = Vec::<HTTP_DATA_CHUNK>::new();
     let mut unknown = Vec::<HTTP_UNKNOWN_HEADER>::new();
     let mut roots = Vec::<Root<JsBuffer>>::new();
     while count > 0 {
-        let mut block = arg_at::<JsBuffer>(&mut cx, &mut i)?;
+        let mut block = cx.arg_buffer(&mut i)?;
         roots.push(block.root(&mut cx));
 
         let slice = block.as_mut_slice(&mut cx);
@@ -568,15 +558,15 @@ fn http_request_send_data(mut cx: FunctionContext) -> JsResult<JsPromise> {
         count -= 1;
     }
 
-    let block = arg_at::<JsBuffer>(&mut cx, &mut i)?;
+    let block = cx.arg_buffer(&mut i)?;
     roots.push(block.root(&mut cx));
 
-    let opaque = arg_at::<JsBoolean>(&mut cx, &mut i)?.value(&mut cx);
-    let more = arg_at::<JsBoolean>(&mut cx, &mut i)?.value(&mut cx);
-    let disconnect = arg_at::<JsBoolean>(&mut cx, &mut i)?.value(&mut cx);
-    while !i.is_empty() {
-        let name = arg_ptr_at(&mut cx, &block, &mut i)?;
-        let value = arg_ptr_at(&mut cx, &block, &mut i)?;
+    let opaque = cx.arg_bool(&mut i)?;
+    let more = cx.arg_bool(&mut i)?;
+    let disconnect = cx.arg_bool(&mut i)?;
+    while i < cx.len() {
+        let name = cx.arg_ptr(&mut i, &block)?;
+        let value = cx.arg_ptr(&mut i, &block)?;
         unknown.push(HTTP_UNKNOWN_HEADER {
             NameLength: name.1 as u16,
             pName: PCSTR(name.0),
@@ -610,28 +600,34 @@ fn http_request_send_data(mut cx: FunctionContext) -> JsResult<JsPromise> {
         flags |= HTTP_SEND_RESPONSE_FLAG_DISCONNECT;
     }
 
-    let count = chunks.len() as u16;
-    let source = SendRef(chunks.as_mut_ptr());
-    let transfer = SendRef((roots, unknown, chunks));
+    let ptr = chunks.as_mut_ptr();
+    let count = chunks.len();
+    let slice = unsafe { from_raw_parts_mut(ptr, count) };
+    let transfer = SendRef((chunks, roots, unknown));
     let tx = cx.channel();
     let (def, promise) = cx.promise();
-    let func = async move {
-        let result = arc.send_data(id, flags, source, count).await;
+    arc.send_data(id, flags, slice, move |err, size|  {
         drop(transfer);
 
         def.settle_with(&tx, move |mut cx| {
-            Ok(cx.number(result.err))
-        });
-    };
+            let obj = cx.empty_object();
+            let js_err = cx.number(err);
+            obj.set(&mut cx, "code", js_err)?;
 
-    tasks().spawn_ok(func);
+            let js_size = cx.number(size);
+            obj.set(&mut cx, "size", js_size)?;
+
+            Ok(obj)
+        });
+    });
+
     Ok(promise)
 }
 
 fn http_request_push(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let arc = JsArc::<Request>::import(&mut cx, 0)?;
-    let id = **cx.argument::<JsBox<u64>>(1)?;
-    let mut i = 2..cx.len();
+    let mut i = 0;
+    let arc = cx.import::<Request>(&mut i)?;
+    let id = cx.arg_u64(&mut i)?;
     let mut unknown = Vec::<HTTP_UNKNOWN_HEADER>::new();
     let mut headers = Box::new(HTTP_REQUEST_HEADERS {
         UnknownHeaderCount: 0,
@@ -641,16 +637,16 @@ fn http_request_push(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         KnownHeaders: [HTTP_KNOWN_HEADER { RawValueLength: 0, pRawValue: PCSTR::null() }; HttpHeaderRequestMaximum.0 as usize]
     });
 
-    let block = arg_at::<JsBuffer>(&mut cx, &mut i)?;
+    let block = cx.arg_buffer(&mut i)?;
     let base = headers.as_mut();
-    let verb = arg_at::<JsNumber>(&mut cx, &mut i)?.value(&mut cx) as i32;
-    let path = arg_ptr_at(&mut cx, &block, &mut i)?;
-    let query = arg_ptr_at(&mut cx, &block, &mut i)?;
-    while !i.is_empty() {
-        let id = arg_at::<JsNumber>(&mut cx, &mut i)?.value(&mut cx);
-        let value = arg_ptr_at(&mut cx, &block, &mut i)?;
-        if id < 0.0 {
-            let name = arg_ptr_at(&mut cx, &block, &mut i)?;
+    let verb = cx.arg_i32(&mut i)?;
+    let path = cx.arg_ptr(&mut i, &block)?;
+    let query = cx.arg_ptr(&mut i, &block)?;
+    while i < cx.len() {
+        let id = cx.arg_i32(&mut i)?;
+        let value = cx.arg_ptr(&mut i, &block)?;
+        if id < 0 {
+            let name = cx.arg_ptr(&mut i, &block)?;
             unknown.push(HTTP_UNKNOWN_HEADER {
                 NameLength: name.1 as u16,
                 pName: PCSTR(name.0),
@@ -670,65 +666,25 @@ fn http_request_push(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
     match arc.push(id, verb, path.0 as *const u16, query.0, headers.as_ref()) {
         Ok(_) => Ok(cx.undefined()),
-        Err(err) => cx.throw_type_error(format!("{}", err))
+        Err((hint, err)) => cx.throw_type_error(format!("{}: {}", hint, err))
     }
 }
 
 fn http_request_close(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let arc = JsArc::<Request>::import(&mut cx, 0)?;
-    arc.close();
-
+    cx.dispose::<Request>(0)?;
     Ok(cx.undefined())
 }
 
-fn http_init(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let config = cx.argument::<JsBoolean>(0)?.value(&mut cx);
-    let server = cx.argument::<JsBoolean>(1)?.value(&mut cx);
-    let mut flags = 0u32;
-    if config {
-        flags |= HTTP_INITIALIZE_CONFIG.0;
-    }
-
-    if server {
-        flags |= HTTP_INITIALIZE_SERVER.0;
-    }
-
-    unsafe  {
-        let err = HttpInitialize(ver_init, HTTP_INITIALIZE(flags), None);
-        match err {
-            0 => Ok(cx.undefined()),
-            _ => cx.throw_type_error(format!("HttpInitialize: Win32_Error = {}", err))
-        }
-    }
-}
-
-fn http_request_create(mut cx: FunctionContext) -> JsArcResult<Request> {
-    let name = cx.argument::<JsString>(0)?.value(&mut cx);
-    unsafe {
-        let flags = HTTP_CREATE_REQUEST_QUEUE_FLAG_OPEN_EXISTING;
-        let name_wide = wide(&name);
-        let name_ptr = wide_ptr(&name_wide);
-
-        let mut queue = HANDLE(-1);
-        let err = HttpCreateRequestQueue(ver_init, name_ptr, null_mut(), flags, &mut queue);
-        if err != 0 {
-            return cx.throw_type_error(format!("HttpCreateRequestQueue: Win32_Error = {}", err));
-        }
-
-        if !bind_io(queue) {
-            CloseHandle(queue);
-            let err = GetLastError().0;
-            return cx.throw_type_error(format!("BindIoCompletionCallback: Win32_Error = {}", err));
-        }
-
-        let request = Request::new(queue);
-        JsArc::export(&mut cx, request)
+fn http_request_create(mut cx: FunctionContext) -> JsResult<JsValue> {
+    let mut i = 0;
+    let name = cx.arg_string(&mut i)?;
+    match Request::create(&name) {
+        Ok(request) => Ok(cx.export(request)),
+        Err((hint, err)) => cx.throw_type_error(format!("{}: {}", hint, err))
     }
 }
 
 pub fn http_bind(cx: &mut ModuleContext) -> NeonResult<()> {
-    cx.export_function("http_init", http_init)?;
-
     cx.export_function("http_session_create", http_session_create)?;
     cx.export_function("http_session_listen", http_session_listen)?;
     cx.export_function("http_session_close", http_session_close)?;

@@ -1,7 +1,7 @@
 use neon::prelude::*;
 
 use std::ffi::OsString;
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use std::thread::{spawn, JoinHandle};
 
@@ -22,7 +22,7 @@ enum State {
 use State::*;
 
 #[allow(non_upper_case_globals)]
-static callbacks: CallbackList = CallbackList::new();
+static callbacks: Delegate<String> = Delegate::new();
 
 #[allow(non_upper_case_globals)]
 static state: Mutex<State> = Mutex::new(PreStart);
@@ -48,6 +48,16 @@ static mut join_handle: Option<JoinHandle<()>> = None;
 #[allow(non_upper_case_globals)]
 static mut start_error: i32 = 0;
 
+struct WatchHandle(Arc<()>);
+
+impl Finalize for WatchHandle {}
+
+impl Drop for WatchHandle {
+    fn drop(&mut self) {
+        callbacks.delete(self.0.clone());
+    }
+}
+
 define_windows_service!(ffi_service_main, service_main_native);
 
 fn service_main_native(_: Vec<OsString>) {
@@ -55,22 +65,22 @@ fn service_main_native(_: Vec<OsString>) {
 }
 
 fn service_main() {
-    callbacks.notify("start");
+    callbacks.send(|| "start");
 
     let hr = service_control_handler::register(unsafe { service_name.clone() }, move |req| {
         match req {
             ServiceControl::Continue => {
-                callbacks.notify("control-continue");
+                callbacks.send(|| "control-continue");
                 ServiceControlHandlerResult::NoError
             },
 
             ServiceControl::Pause => {
-                callbacks.notify("control-pause");
+                callbacks.send(|| "control-pause");
                 ServiceControlHandlerResult::NoError
             },
 
             ServiceControl::Stop => {
-                callbacks.notify("control-stop");
+                callbacks.send(|| "control-stop");
                 ServiceControlHandlerResult::NoError
             },
 
@@ -84,9 +94,9 @@ fn service_main() {
             *value = Some(h);
         }
 
-        callbacks.notify("control-register");
+        callbacks.send(|| "control-register");
     } else {
-        callbacks.notify("control-idle");
+        callbacks.send(|| "control-idle");
     }
 
     let mut guard = state.lock();
@@ -225,17 +235,28 @@ pub fn service_bind(cx: &mut ModuleContext) -> NeonResult<()> {
     Ok(())
 }
 
-fn service_watch(mut cx: FunctionContext) -> JsResult<JsBox<usize>> {
+fn service_watch(mut cx: FunctionContext) -> JsResult<JsValue> {
     let cb = cx.argument::<JsFunction>(0)?;
-    let ptr = callbacks.add(&mut cx, cb);
-    return Ok(cx.boxed(ptr));
+    let root = Arc::new(cb.root(&mut cx));
+    let tx = cx.channel();
+    let arc = callbacks.push(move |info| {
+        let arc = root.clone();
+        tx.send(move |mut cx| {
+            let f = (*arc).to_inner(&mut cx);
+            let arg = cx.string(info);
+            f.call_with(&mut cx).arg(arg).exec(&mut cx)?;
+
+
+            Ok(())
+        });
+    });
+
+    Ok(cx.export(WatchHandle(arc)))
 }
 
 fn service_clear(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     if cx.len() > 0 {
-        if let Ok(ptr) = cx.argument::<JsBox<usize>>(0) {
-            callbacks.remove(**ptr);
-        }
+        cx.dispose::<WatchHandle>(0)?;
     } else {
         callbacks.clear();
     }
@@ -244,8 +265,9 @@ fn service_clear(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 }
 
 fn service_post(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let msg = cx.argument::<JsString>(0)?;
-    callbacks.notify(&msg.value(&mut cx));
+    let mut i = 0;
+    let msg = cx.arg_string(&mut i)?;
+    callbacks.send(|| &msg);
 
     return Ok(cx.undefined());
 }

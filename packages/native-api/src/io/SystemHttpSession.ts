@@ -1,38 +1,41 @@
 import NodePlugin from "../NodePlugin";
 
 let svc: any;
-let init = false;
 
 export class SystemHttpSession {
-    readonly ref: unknown;
+    readonly ref: [unknown];
     readonly name?: string;
 
-    constructor(ref: unknown, name?: string) {
-        this.done = this.done.bind(this);
+    constructor(ref: [unknown], name?: string) {
         this.ref = ref;
         this.name = name;
     }
 
     static create(name: string) {
         svc = NodePlugin.setup();
-        init || svc.http_init(false, true);
-        init = true;
 
         let ref = svc.http_session_create(name);
-        return new this(ref, name);
+        return new this([ref], name);
     }
 
-    done() {
-        return !this.ref;
+    handle() {
+        const { ref } = this;
+        if (ref[0]) {
+            return ref[0];
+        }
+
+        return undefined;
     }
 
     close() {
-        this.ref && svc.http_session_close(this.ref);
-        Object.assign(this, { ref: undefined });
+        const { ref } = this;
+        if (ref[0]) {
+            svc.http_session_close(ref.pop());
+        }
     }
 
     listen(url: string) {
-        svc.http_session_listen(this.ref, url);
+        svc.http_session_listen(this.handle(), url);
     }
 }
 
