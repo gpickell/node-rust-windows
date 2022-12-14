@@ -381,6 +381,11 @@ fn http_request_receive(mut cx: FunctionContext) -> JsResult<JsPromise> {
     let tx = cx.channel();
     let (def, promise) = cx.promise();
     arc.receive(size, move |err, vec, result| {
+        let mut user_opt: Option<Arc<HandleRef>> = None;
+        if err == 0 || err == ERROR_MORE_DATA.0 {
+            user_opt = find_user_token(&result.0);
+        }
+
         def.settle_with(&tx, move |mut cx| {
             let info = &result.0.Base;
             let obj = cx.empty_object();
@@ -470,7 +475,7 @@ fn http_request_receive(mut cx: FunctionContext) -> JsResult<JsPromise> {
                 }
             }
 
-            if let Some(user) = find_user_token(&result.0) {
+            if let Some(user) = user_opt {
                 let js_user = cx.boxed(RefCell::new(Some(user)));
                 obj.set(&mut cx, "user", js_user)?;
             }
@@ -517,6 +522,9 @@ fn http_request_send(mut cx: FunctionContext) -> JsResult<JsPromise> {
     let mut i = 0;
     let arc = cx.import::<Request>(&mut i)?;
     let id = cx.arg_u64(&mut i)?;
+    let mut infos = Vec::<HTTP_RESPONSE_INFO>::new(); 
+    let mut known = Vec::<HTTP_KNOWN_HEADER>::new();
+    let mut multiple = Vec::<HTTP_MULTIPLE_KNOWN_HEADERS>::new();
     let mut unknown = Vec::<HTTP_UNKNOWN_HEADER>::new();
     let mut response = Box::new(HTTP_RESPONSE_V2 {
         Base: HTTP_RESPONSE_V1 {
@@ -572,15 +580,69 @@ fn http_request_send(mut cx: FunctionContext) -> JsResult<JsPromise> {
                 RawValueLength: value.1 as u16,
                 pRawValue: PCSTR(value.0)
             });
-
-            base.Headers.UnknownHeaderCount = unknown.len() as u16;
-            base.Headers.pUnknownHeaders = unknown.as_mut_ptr();            
         } else {
-            base.Headers.KnownHeaders[id as usize] = HTTP_KNOWN_HEADER {
+            let mut assign = true;
+            let first = &mut base.Headers.KnownHeaders[id as usize];
+            let next = HTTP_KNOWN_HEADER {
                 RawValueLength: value.1 as u16,
-                pRawValue: PCSTR(value.0)
+                pRawValue: PCSTR(value.0)    
             };
+            
+            if let Some(last) = multiple.last_mut() {
+                if last.HeaderId.0 == id {
+                    assign = false;
+                    known.push(next);
+                    last.KnownHeaderCount += 1;
+                }                
+            }
+
+            if assign {
+                if first.RawValueLength > 0 {
+                    let mut flags = 0;
+                    if id == HttpHeaderWwwAuthenticate.0 {
+                        flags |= HTTP_RESPONSE_INFO_FLAGS_PRESERVE_ORDER;
+                    }
+
+                    known.push(*first);
+                    known.push(next);
+                    multiple.push(HTTP_MULTIPLE_KNOWN_HEADERS {
+                        HeaderId: HTTP_HEADER_ID(id),
+                        Flags: flags,
+                        KnownHeaderCount: 2,
+                        KnownHeaders: null_mut()
+                    });
+
+                    *first = HTTP_KNOWN_HEADER::default();
+                } else {
+                    *first = next;
+                }
+            }
         }
+    }
+
+    if unknown.len() > 0 {
+        base.Headers.UnknownHeaderCount = unknown.len() as u16;
+        base.Headers.pUnknownHeaders = unknown.as_mut_ptr();            
+    }
+
+    if multiple.len() > 0 {
+        let mut slice = known.as_mut_slice();
+        for i in multiple.iter_mut() {
+            let count = i.KnownHeaderCount as usize;
+            i.KnownHeaders = slice.as_mut_ptr();
+            slice = &mut slice[0..count];
+
+            infos.push(HTTP_RESPONSE_INFO {
+                Type: HttpResponseInfoTypeMultipleKnownHeaders,
+                Length: size_of::<HTTP_MULTIPLE_KNOWN_HEADERS>() as u32,
+                pInfo: i as *mut HTTP_MULTIPLE_KNOWN_HEADERS as *mut c_void
+            });
+        }
+    }
+
+    if infos.len() > 0 {
+        response.ResponseInfoCount = infos.len() as u16;
+        response.pResponseInfo = infos.as_mut_ptr();  
     }
 
     let mut flags = 0;
@@ -597,7 +659,7 @@ fn http_request_send(mut cx: FunctionContext) -> JsResult<JsPromise> {
     }
     
     let ptr = response.as_mut() as *mut HTTP_RESPONSE_V2;
-    let transfer = SendRef((root, response, unknown));
+    let transfer = SendRef((root, response, infos, multiple, known, unknown));
     let tx = cx.channel();
     let (def, promise) = cx.promise();
     arc.send(id, flags, unsafe { &mut *ptr }, move |err, size| {
@@ -744,15 +806,17 @@ fn http_request_push(mut cx: FunctionContext) -> JsResult<JsUndefined> {
                 RawValueLength: value.1 as u16,
                 pRawValue: PCSTR(value.0)
             });
-
-            base.UnknownHeaderCount = unknown.len() as u16;
-            base.pUnknownHeaders = unknown.as_mut_ptr();            
         } else {
             base.KnownHeaders[id as usize] = HTTP_KNOWN_HEADER {
                 RawValueLength: value.1 as u16,
                 pRawValue: PCSTR(value.0)
             };
         }
+    }
+
+    if unknown.len() > 0 {
+        base.UnknownHeaderCount = unknown.len() as u16;
+        base.pUnknownHeaders = unknown.as_mut_ptr();
     }
 
     match arc.push(id, verb, path.0 as *const u16, query.0, headers.as_ref()) {

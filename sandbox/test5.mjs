@@ -47,7 +47,7 @@ server.on("request", (req, res) => {
 
         res.statusCode = user.length ? 200 : 401;
         res.setHeader("Content-Type", "text/plain");
-        res.setHeader("WWW-Authenticate", "Negotiate");
+        res.setHeader("WWW-Authenticate", ["Negotiate", "NTLM"]);
         res.write("Some Server Content");
         res.end();
     });

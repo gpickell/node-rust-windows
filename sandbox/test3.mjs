@@ -37,6 +37,7 @@ server.on("request", (req, res) => {
         console.log("--- server end");
 
         res.statusCode = 200;
+        res.setHeader("X-WWW-Authenticate", ["Negotiate", "NTLM"])
         res.write("Some Server Content");
         res.end();
     });
@@ -58,7 +59,7 @@ async function test(ms) {
         res.setEncoding("utf-8");
         res.resume();
 
-        console.log("--- client", res.httpVersion, res.statusCode, res.statusMessage, res.headers);
+        console.log("--- client", res.httpVersion, res.statusCode, res.statusMessage, res.rawHeaders);
         
         res.on("data", x => console.log("--- client data", JSON.stringify(x)));
         res.on("end", x => console.log("--- client end"));
