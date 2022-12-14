@@ -27,11 +27,11 @@ async function receive_it() {
     //req.disconnect = true;
     req.response.status = 200;
     req.response.reason = "OK";
-    req.response.addHeader("Cache-Control", "no-cache");
-    //req.response.addHeader("Content-Length", "12");
-    req.response.addHeader("Transfer-Encoding", "chunked");
-    req.response.addHeader("X-Test", "test1");
-    req.response.addTrailer("X-Trailer", "test22");
+    req.response.headers.add("Cache-Control", "no-cache");
+    //req.response.headers.add("Content-Length", "12");
+    req.response.headers.add("Transfer-Encoding", "chunked");
+    req.response.headers.add("X-Test", "test1");
+    req.response.trailers.add("X-Trailer", "test22");
     console.log("--- send", await req.send());
     console.log("--- send data", await req.sendData("test123 asdf", true));
 }

@@ -120,26 +120,7 @@ function initMapper() {
 }
 
 const mapper = initMapper();
-const empty = Object.freeze(Object.create(null));
 let svc: any;
-
-function addHeader<T extends Record<"headers", Record<string, string>>>(this: T, name: string, value: string) {
-    let { headers } = this;
-    if (Object.isFrozen(headers)) {
-        headers = this.headers = Object.create(null);
-    }
-
-    headers[name] = value;
-}
-
-function addTrailer<T extends Record<"trailers", Record<string, string>>>(this: T, name: string, value: string) {
-    let { trailers } = this;
-    if (Object.isFrozen(trailers)) {
-        trailers = this.trailers = Object.create(null);
-    }
-
-    trailers[name] = value;
-}
 
 type BlockItem = Buffer | boolean | number | string | [string, BufferEncoding];
 
@@ -193,45 +174,140 @@ function addBlockHeader(array: BlockItem[], name: string, value: string) {
     }
 }
 
-export interface RequestData {
-    headers: Record<string, string>;
-    method: string;
-    url: string;
-    version: string;
+export class Headers extends Array<[string, string, string, boolean]> {
+    add(name: string, value: string) {
+        value = value.trim();
 
-    addHeader(name: string, value: string): void;
+        if (value) {
+            this.push([name.toLowerCase(), name, value, false]);
+        }
+    }
+
+    all(name: string) {
+        name = name.toLowerCase();
+
+        const result: string[] = [];
+        for (const [key, _, value, first] of this) {
+            if (key === name) {
+                if (first) {
+                    result.length = 0;
+                }
+    
+                if (value) {
+                    result.push(value);
+                }
+            }
+        }
+
+        return result;
+    }
+
+    get(name: string) {
+        name = name.toLowerCase();
+
+        let result: string | undefined;
+        for (const [key, _, value, first] of this) {
+            if (key === name) {
+                if (first || result === undefined) {
+                    result = value || undefined;
+                }
+            }
+        }
+
+        return result;
+    }
+
+    set(name: string, value: string) {
+        value = value.trim();
+
+        if (value) {
+            this.push([name.toLowerCase(), name, value, true]);
+        }
+    }
+
+    clear() {
+        this.length = 0;
+    }
+
+    delete(name: string) {
+        this.push([name.toLowerCase(), name, "", true]);
+    }
+
+    load(hints: string[] | Record<string, string | string[] | number | undefined>) {
+        if (Array.isArray(hints)) {
+            let key: string | undefined;
+            for (const hint of hints) {
+                if (key === undefined) {
+                    key = hint;
+                } else {
+                    this.add(key, hint);
+                    key = undefined;
+                }
+            }
+        } else {
+            for (const key in hints) {
+                let hint = hints[key];
+                if (typeof hint === "number") {
+                    this.add(key, String(hint));
+                }
+
+                if (typeof hint === "string") {
+                    this.add(key, hint);
+                }
+
+                if (Array.isArray(hint)) {
+                    hint.forEach(x => this.add(key, x));
+                }                
+            }
+        }
+    }
+
+    *render() {
+        const groups = new Map<string, [string, string[]]>();
+        for (const [key, name, value, first] of this) {
+            const group = groups.get(key) || [name, []];
+            if (first) {
+                group[0] = name;
+                group[1].length = 0;
+                groups.delete(key);
+            }
+
+            if (value) {
+                group[1].push(value);
+                groups.set(key, group);
+            }
+        }
+
+        for (const list of groups.values()) {
+            yield list;
+        }
+    }
+
+    *renderFlat() {
+        for (const [name, values] of this.render()) {
+            for (const value of values) {
+                yield [name, value];
+            }
+        }
+    }
 }
 
-export interface ResponseData {
-    headers: Record<string, string>;
-    reason: string;
-    status: number;
-    trailers: Record<string, string>;
-    version: string;
+export class RequestData {
+    method = "";
+    url = "";
+    version = "";
 
-    addHeader(name: string, value: string): void;
-    addTrailer(name: string, value: string): void;
+    readonly headers = new Headers();
 }
 
-const protoRequest: RequestData = {
-    method: "",
-    url: "",
-    version: "",
-    headers: empty,
-    addHeader,
-};
+export class ResponseData {
+    status = 0;
+    reason = "";
+    version = "";
 
-const protoResponse: ResponseData = {
-    status: 0,
-    reason: "",
-    version: "",
-
-    headers: empty,
-    trailers: empty,
-
-    addHeader,
-    addTrailer
-};
+    readonly headers = new Headers();
+    readonly trailers = new Headers();
+}
 
 type Data = string | Buffer | (string | Buffer)[];
 
@@ -246,8 +322,8 @@ export class SystemHttpRequest {
     readonly ref: [unknown];
     readonly name: string;
 
-    readonly request: RequestData = Object.create(protoRequest);
-    readonly response: ResponseData = Object.create(protoResponse);
+    readonly request = new RequestData();
+    readonly response = new ResponseData();
 
     readable = true;
     writable = true;
@@ -290,7 +366,7 @@ export class SystemHttpRequest {
     }
 
     // @ts-ignore
-    push(method: string, url: string, headers?: Record<string, string> | false = false) {
+    push(method: string, url: string, headers: Headers) {
         const path = url.replace(/\?.*/, "");
         const query = url.substring(path.length);
         const block: BlockItem[] = [
@@ -299,7 +375,7 @@ export class SystemHttpRequest {
             query,
         ];
 
-        for (const [name, value] of Object.entries(headers)) {
+        for (const [name, value] of headers.renderFlat()) {
             addBlockHeader(block, name, value);
         }
         
@@ -359,10 +435,6 @@ export class SystemHttpRequest {
 
         this.id[0] = id;
 
-        if (rest.more) {
-            return 0;
-        }
-
         const { request, response } = this;
         request.method = rest.customVerb || mapper.verb(rest.verb) || "";
         request.url = rest.url || "";
@@ -370,21 +442,11 @@ export class SystemHttpRequest {
         response.version = rest.version;
         this.speedy = !!rest.http2;
 
-        if (knownHeaders) {
-            for (const [i, value] of knownHeaders.entries()) {
-                if (value) {
-                    request.addHeader(mapper.request(i), value);
-                }
-            }
+        for (const [i, value] of knownHeaders.entries()) {
+            value && request.headers.add(mapper.request(i), value);
         }
 
-        if (unknownHeaders) {
-            for (const [key, value] of Object.entries(unknownHeaders)) {
-                if (value) {
-                    request.addHeader(key, unknownHeaders[key]);
-                }
-            }
-        }
+        request.headers.load(unknownHeaders);
 
         this.readable = !!rest.body;
         this.user = user;
@@ -423,16 +485,15 @@ export class SystemHttpRequest {
             response.reason,
         ];
 
-        for (const [name, value] of Object.entries(response.headers)) {
-            if (name.toLowerCase() === "transfer-encoding" && value === "chunked") {
-                this.chunked = true;
-            }
+        let te = response.headers.get("Transfer-Encoding") || "";
+        this.chunked = te === "chunked";
 
+        for (const [name, value] of response.headers.renderFlat()) {
             addBlockHeader(block, name, value);
         }
 
         if (!this.writable) {
-            for (const [name, value] of Object.entries(response.trailers)) {
+            for (const [name, value] of response.trailers.renderFlat()) {
                 addBlockHeader(block, name, value);
             }
         }
@@ -460,7 +521,7 @@ export class SystemHttpRequest {
         let hasTrailers = false;
         if (!this.writable && this.chunked) {
             const { response } = this;
-            for (const [name, value] of Object.entries(response.trailers)) {
+            for (const [name, value] of response.trailers.renderFlat()) {
                 hasTrailers = true;
                 block.push(name, value);
             }

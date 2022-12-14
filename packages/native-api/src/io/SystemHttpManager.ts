@@ -138,7 +138,7 @@ class OpQueue extends Set<() => boolean | Promise<boolean>> {
 }
 
 function relayContinue(native: SystemHttpRequest, info: InformationEvent) {
-    const expect = native.request.headers["Expect"] || "";
+    const expect = native.request.headers.get("Expect") || "";
     if (expect.toLowerCase() !== "100-continue") {
         return false;
     }
@@ -161,30 +161,15 @@ function wantContinue(native: SystemHttpRequest) {
     }
 
     const headers = native.request.headers;
-    if (headers["Content-Length"]) {
+    if (headers.get("Content-Length")) {
         return true;
     }
 
-    if (headers["Transfer-Encoding"]) {
+    if (headers.get("Transfer-Encoding")) {
         return true;
     }
 
     return false;
-}
-
-function headersFromRaw(raw: string[]) {
-    let key: string | undefined;
-    const headers = Object.create(null) as Record<string, string>;
-    for (const value of raw) {
-        if (key === undefined) {
-            key = value;
-        } else {
-            headers[key] = value;
-            key = undefined;
-        }
-    }
-
-    return headers;
 }
 
 export interface RelayRequestEvent {
@@ -322,7 +307,7 @@ class RelayHelper {
                     const res = native.response;
                     res.status = 502;
                     res.reason = "Bad Gateway";
-                    res.addHeader("Transfer-Encoding", "chunked");
+                    res.headers.set("Transfer-Encoding", "chunked");
 
                     owner.emit("relay-error", {
                         initial: native.request,
@@ -356,7 +341,8 @@ class RelayHelper {
                 const res = native.response;
                 res.status = response.statusCode || 0;
                 res.reason = response.statusMessage || "Unknown";
-                res.headers = headersFromRaw(response.rawHeaders);
+                res.headers.clear();
+                res.headers.load(response.rawHeaders);
                 native.opaque = true;
                 ignoreClose = true;
                 source.pause();
@@ -384,7 +370,8 @@ class RelayHelper {
                 const res = native.response;
                 res.status = response.statusCode || 0;
                 res.reason = response.statusMessage || "Unknown";
-                res.headers = headersFromRaw(response.rawHeaders);
+                res.headers.clear();
+                res.headers.load(response.rawHeaders);
                 native.opaque = true;
                 ignoreClose = true;
                 source.pause();
@@ -411,8 +398,9 @@ class RelayHelper {
                     const res = native.response;
                     res.status = info.statusCode;
                     res.reason = info.statusMessage;
-                    res.headers = headersFromRaw(info.rawHeaders);
-    
+                    res.headers.clear();
+                    res.headers.load(info.rawHeaders);
+        
                     owner.emit("relay-continue", {
                         initial: native.request,
                         sent: request,
@@ -434,7 +422,8 @@ class RelayHelper {
                 const res = native.response;
                 res.status = response.statusCode || 0;
                 res.reason = response.statusMessage || "Unknown";
-                res.headers = headersFromRaw(response.rawHeaders);
+                res.headers.clear();
+                res.headers.load(response.rawHeaders);
                 native.disconnect = te !== "chunked" && !cl;
                 ignoreClose = true;
                 response.pause();
@@ -453,7 +442,7 @@ class RelayHelper {
                 });
 
                 ops.send(response, native, () => {
-                    res.trailers = response.trailers as any;
+                    res.trailers.load(response.trailers);
 
                     owner.emit("relay-trailers", {
                         initial: native.request,
@@ -471,7 +460,7 @@ class RelayHelper {
     async relay(owner: SystemHttpManager) {
         const { native, source } = this;
         const { method, headers, url } = native.request;
-        const client = request({ method, headers, path: url, createConnection: () => source as any });
+        const client = request({ method, headers: Object.fromEntries(headers.render()), path: url, createConnection: () => source as any });
         Object.assign(this, { request: client });
 
         const req = this.relayRequest(client, owner);

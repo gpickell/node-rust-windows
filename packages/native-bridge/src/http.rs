@@ -444,6 +444,7 @@ fn http_request_receive(mut cx: FunctionContext) -> JsResult<JsPromise> {
                     }
                 }
 
+                let mut i = 0;
                 let js_unknown = cx.empty_array();
                 obj.set(&mut cx, "unknownHeaders", js_unknown)?;
                 
@@ -456,8 +457,13 @@ fn http_request_receive(mut cx: FunctionContext) -> JsResult<JsPromise> {
                     if header.NameLength > 0 && header.RawValueLength > 0 {
                         if let Ok(key) = header.pName.to_string() {
                             if let Ok(value) = header.pRawValue.to_string() {
+                                let js_key = cx.string(key);
+                                js_unknown.set(&mut cx, i, js_key)?;
+                                i += 1;
+
                                 let js_value = cx.string(value);
-                                js_unknown.set(&mut cx, key.as_str(), js_value)?;
+                                js_unknown.set(&mut cx, i, js_value)?;
+                                i += 1;
                             }
                         }
                     }

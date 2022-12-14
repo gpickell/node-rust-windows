@@ -64,40 +64,9 @@ async function test(ms) {
         res.on("end", x => console.log("--- client end"));
     });
 
+    req.setHeader("X-Test-Client", "custom-header-1");
     req.write("Some Client Content");
     req.end();
-}
-
-async function test2(ms) {
-    await new Promise(x => setTimeout(x, ms));
-    console.log("--- test2");
-
-    const freeSockets = agent.freeSockets;
-    agent.freeSockets = Object.create(null);
-
-    let socket;
-    for (const [key, sockets] of Object.entries(freeSockets)) {
-        if (Array.isArray(sockets)) {
-            socket = sockets[0];
-        }
-    }
-
-    function send() {
-        socket.write("POST / HTTP/1.1\r\n");
-        socket.write("Host: localhost\r\n");
-        socket.write("Connection: keep-slive\r\n");
-        socket.write("Content-Length: 4\r\n");
-        socket.write("\r\n");
-
-        socket.write("test");
-    }
-
-    if (socket) {
-        send();
-        send();
-
-        socket.on("data", x => console.log("--- x", JSON.stringify(x.toString())));
-    }
 }
 
 test(300);
