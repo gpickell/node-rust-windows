@@ -145,8 +145,6 @@ impl Session {
             }
 
             if auth_ex {
-                println!("--- auth ex");
-
                 let ptr = &auth_config as *const HTTP_SERVER_AUTHENTICATION_INFO as *const c_void;
                 let size = size_of::<HTTP_SERVER_AUTHENTICATION_INFO>();
                 let err = HttpSetUrlGroupProperty(self.urls, HttpServerExtendedAuthenticationProperty, ptr, size as u32);

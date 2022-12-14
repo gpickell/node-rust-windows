@@ -442,7 +442,6 @@ export class SystemHttpRequest {
         return code as number;
     }
 
-    // @ts-ignore
     async sendData(data: Data, final = false) {
         if (!Array.isArray(data)) {
             data = [data];

@@ -13,7 +13,7 @@ const name = "test-v4";
 const manager = new Manager();
 manager.createSession(name);
 
-manager.config("auth", "negotiate");
+manager.config("auth-extended", "negotiate", "ntlm");
 
 manager.process(name);
 
