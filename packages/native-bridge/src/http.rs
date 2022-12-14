@@ -5,6 +5,7 @@ use neon::prelude::*;
 use neon::types::buffer::*;
 
 use core::ptr::*;
+use std::cell::RefCell;
 
 use windows::core::PCSTR;
 use windows::core::PCWSTR;
@@ -13,8 +14,9 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Networking::HttpServer::*;
 
 use std::ffi::*;
+use std::mem::size_of;
+use std::slice::from_raw_parts;
 use std::slice::from_raw_parts_mut;
-use std::mem;
 use std::sync::Arc;
 
 #[allow(non_upper_case_globals)]
@@ -22,6 +24,20 @@ static ver_init: HTTPAPI_VERSION = HTTPAPI_VERSION {
     HttpApiMajorVersion: 2,
     HttpApiMinorVersion: 0,
 };
+
+pub fn find_user_token(req: &HTTP_REQUEST_V2) -> Option<Arc<HandleRef>> {
+    unsafe {
+        let slice = from_raw_parts(req.pRequestInfo, req.RequestInfoCount  as usize);    
+        for info in slice {
+            if info.InfoType == HttpRequestInfoTypeAuth {
+                let auth = &*(info.pInfo as *const HTTP_REQUEST_AUTH_INFO);
+                return Some(HandleRef::new(auth.AccessToken));
+            }
+        }
+    }
+    
+    None
+}
 
 struct SendRef<T>(T);
 
@@ -82,7 +98,7 @@ impl Session {
                 RequestQueueHandle: queue
             };
 
-            let size = mem::size_of::<HTTP_BINDING_INFO>() as u32;
+            let size = size_of::<HTTP_BINDING_INFO>() as u32;
             let err = HttpSetUrlGroupProperty(urls, prop, &info as *const HTTP_BINDING_INFO as *const c_void, size);
             if err != 0 {
                 HttpCloseUrlGroup(urls);
@@ -92,6 +108,54 @@ impl Session {
             }
    
             Ok(Self { queue, session, urls })
+        }
+    }
+
+    pub fn config(self: &Arc<Self>, vec: Vec<String>) -> Result<(), (&'static str, u32)> {
+        unsafe {
+            let mut auth = false;
+            let mut auth_ex = false;
+            let mut auth_config = HTTP_SERVER_AUTHENTICATION_INFO::default();
+            for flag in vec.iter() {
+                match &flag[..] {
+                    "auth" => auth = true,
+                    "auth-extended" => auth_ex = true,
+                    "ntlm" => auth_config.AuthSchemes |= HTTP_AUTH_ENABLE_NTLM,
+                    "negotiate" => auth_config.AuthSchemes |= HTTP_AUTH_ENABLE_NEGOTIATE,
+                    "kerberos" => auth_config.AuthSchemes |= HTTP_AUTH_ENABLE_KERBEROS,
+                    "cache-credentials" => auth_config.ExFlags |= HTTP_AUTH_EX_FLAG_ENABLE_KERBEROS_CREDENTIAL_CACHING as u8,
+                    "capture-credentials" => auth_config.ExFlags |= HTTP_AUTH_EX_FLAG_CAPTURE_CREDENTIAL as u8,
+                    _ => (),
+                }
+            }
+
+            auth_config.Flags = HTTP_PROPERTY_FLAGS {
+                _bitfield: 1
+            };
+
+            auth_config.ReceiveContextHandle = BOOLEAN(1);
+
+            if auth {
+                let ptr = &auth_config as *const HTTP_SERVER_AUTHENTICATION_INFO as *const c_void;
+                let size = size_of::<HTTP_SERVER_AUTHENTICATION_INFO>();
+                let err = HttpSetUrlGroupProperty(self.urls, HttpServerAuthenticationProperty, ptr, size as u32);
+                if err != 0 {
+                    return Err(("HttpSetUrlGroupProperty", err))
+                }
+            }
+
+            if auth_ex {
+                println!("--- auth ex");
+
+                let ptr = &auth_config as *const HTTP_SERVER_AUTHENTICATION_INFO as *const c_void;
+                let size = size_of::<HTTP_SERVER_AUTHENTICATION_INFO>();
+                let err = HttpSetUrlGroupProperty(self.urls, HttpServerExtendedAuthenticationProperty, ptr, size as u32);
+                if err != 0 {
+                    return Err(("HttpSetUrlGroupProperty", err))
+                }
+            }
+
+            Ok(())
         }
     }
 
@@ -179,6 +243,9 @@ impl Request {
             let o = h0.wrap(move |err, size| {
                 let result = &*(vec.as_ptr() as *const SendRef<HTTP_REQUEST_V2>);
                 if err == ERROR_MORE_DATA.0 {
+                    // Make sure we close the handle
+                    find_user_token(&result.0);
+
                     let id = result.0.Base.RequestId;
                     let vec = Vec::<u8>::with_capacity(size as usize);
                     let ptr = vec.as_ptr() as *mut HTTP_REQUEST_V2;
@@ -262,6 +329,21 @@ fn http_session_create(mut cx: FunctionContext) -> JsResult<JsValue> {
         Ok(session) => Ok(cx.export(session)),
         Err((hint, err)) => cx.throw_type_error(format!("{}: {}", hint, err))
     }
+}
+
+fn http_session_config(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+    let mut i = 0;
+    let arc = cx.import::<Session>(&mut i)?;
+    let mut flags = Vec::<String>::new();
+    while i < cx.len() {
+        let flag = cx.arg_string(&mut i)?;
+        flags.push(flag);
+    }
+    
+    match arc.config(flags) {
+        Ok(()) => Ok(cx.undefined()),
+        Err((hint, err)) => cx.throw_type_error(format!("{}: {}", hint, err))
+    } 
 }
 
 fn http_session_listen(mut cx: FunctionContext) -> JsResult<JsUndefined> {
@@ -382,6 +464,11 @@ fn http_request_receive(mut cx: FunctionContext) -> JsResult<JsPromise> {
                         }
                     }
                 }
+            }
+
+            if let Some(user) = find_user_token(&result.0) {
+                let js_user = cx.boxed(RefCell::new(Some(user)));
+                obj.set(&mut cx, "user", js_user)?;
             }
 
             drop(vec);
@@ -686,6 +773,7 @@ fn http_request_create(mut cx: FunctionContext) -> JsResult<JsValue> {
 
 pub fn http_bind(cx: &mut ModuleContext) -> NeonResult<()> {
     cx.export_function("http_session_create", http_session_create)?;
+    cx.export_function("http_session_config", http_session_config)?;
     cx.export_function("http_session_listen", http_session_listen)?;
     cx.export_function("http_session_close", http_session_close)?;
 

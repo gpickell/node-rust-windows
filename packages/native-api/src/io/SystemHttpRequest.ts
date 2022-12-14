@@ -239,6 +239,8 @@ function toBuffer(data: string | Buffer) {
     return typeof data === "string" ? Buffer.from(data) : data;
 }
 
+export type UserGroup<T = Promise<string>> = [type: string, sid: string, name?: T];
+
 export class SystemHttpRequest {
     readonly id: [unknown];
     readonly ref: [unknown];
@@ -254,6 +256,7 @@ export class SystemHttpRequest {
     disconnect = false;
     opaque = false;
     speedy = false;
+    user: unknown;
 
     constructor(ref: [unknown], name: string) {
         this.done = this.done.bind(this);
@@ -325,8 +328,31 @@ export class SystemHttpRequest {
         return 0;
     }
 
+    resolveIdentity(names = false) {
+        const { user } = this;
+        this.user = undefined;
+
+        if (user) {
+            let result = svc.user_groups("viaToken", names, user) as UserGroup[];
+            svc.user_close(user);
+
+            return result;
+        }
+
+        return [];
+    }
+
+    dropIdentity() {
+        const { user } = this;
+        this.user = undefined;
+
+        if (user) {
+            svc.user_close(user);
+        }
+    }
+
     async receive(size = 0) {
-        const { knownHeaders, unknownHeaders, id, ...rest } = await svc.http_request_receive(this.handle(), size);
+        const { knownHeaders, unknownHeaders, id, user, ...rest } = await svc.http_request_receive(this.handle(), size);
         if (rest.code !== 0) {
             return rest.code as number;
         }
@@ -361,6 +387,7 @@ export class SystemHttpRequest {
         }
 
         this.readable = !!rest.body;
+        this.user = user;
         return true;
     }
 

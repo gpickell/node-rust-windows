@@ -107,7 +107,7 @@ unsafe fn add_type_sid<'a>(cx: &mut FunctionContext<'a>, name: Handle<'a, JsStri
     return Ok(list)
 }
 
-fn user_claims(mut cx: FunctionContext) -> JsResult<JsArray> {
+fn user_groups(mut cx: FunctionContext) -> JsResult<JsArray> {
     cx.export(());
 
     unsafe {
@@ -219,8 +219,14 @@ fn user_claims(mut cx: FunctionContext) -> JsResult<JsArray> {
     }
 }
 
+fn user_close(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+    cx.dispose::<HandleRef>(0)?;
+    Ok(cx.undefined())
+}
+
 pub fn user_bind(cx: &mut ModuleContext) -> NeonResult<()> {
-    cx.export_function("user_claims", user_claims)?;
+    cx.export_function("user_groups", user_groups)?;
+    cx.export_function("user_close", user_close)?;
 
     Ok(())
 }

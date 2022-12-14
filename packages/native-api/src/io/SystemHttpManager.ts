@@ -5,6 +5,7 @@ import { DuplexPair } from "./DuplexPair";
 
 import SystemHttpRequest, { RequestData, ResponseData } from "./SystemHttpRequest";
 import SystemHttpSession from "./SystemHttpSession";
+import UserInfo, { UserGroup } from "./UserInfo";
 
 class OpQueue extends Set<() => boolean | Promise<boolean>> {
     private done: () => boolean;
@@ -191,6 +192,7 @@ export interface RelayRequestEvent {
     send: ClientRequest;
     state: any;
 
+    resolveIdentity(names?: boolean): UserGroup[];
     drop(): void;
 }
 
@@ -249,7 +251,7 @@ class RelayHelper {
     }
 
     relayRequest(request: ClientRequest, owner: SystemHttpManager) {
-        const { native, source, state } = this;
+        const { native, source, state, target } = this;
         return new Promise<boolean>(resolve => {
             const ops = new OpQueue(() => native.done(), resolve);
             request.on("connect", () => {
@@ -269,9 +271,20 @@ class RelayHelper {
                     initial: native.request,
                     send: request,
                     state,
+
+                    resolveIdentity: (names?: boolean) => {
+                        const result = native.resolveIdentity(names);
+                        UserInfo.register(target, result);
+
+                        return result;
+                    },
+
                     drop: ops.fail
                 });
                
+                native.dropIdentity();
+                owner.emit("handoff", target);
+
                 return false;
             });
 
@@ -460,7 +473,6 @@ class RelayHelper {
         const { method, headers, url } = native.request;
         const client = request({ method, headers, path: url, createConnection: () => source as any });
         Object.assign(this, { request: client });
-        owner.emit("handoff", this.target);
 
         const req = this.relayRequest(client, owner);
         const res = this.relayResponse(client, owner);
@@ -549,6 +561,15 @@ export class SystemHttpManager extends EventEmitter {
     createSession(name: string) {
         const session = this.session = SystemHttpSession.create(name);
         this.sessions.add(session);
+    }
+
+    config(...args: (string | string[])[]) {
+        if (this.session === undefined) {
+            return false;
+        }
+
+        this.session.config(...args);
+        return true;
     }
 
     listen(urlPrefix: string) {

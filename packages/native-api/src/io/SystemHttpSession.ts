@@ -18,6 +18,10 @@ export class SystemHttpSession {
         return new this([ref], name);
     }
 
+    config(...args: (string | string[])[]) {
+        svc.http_session_config(this.handle(), ...args.flat());
+    }
+
     handle() {
         const { ref } = this;
         if (ref[0]) {
