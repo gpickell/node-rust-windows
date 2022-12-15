@@ -1,37 +1,52 @@
 import { appendFileSync, writeFileSync } from "fs";
 import NodePlugin from "@tsereact/node-rust-windows-native-api/NodePlugin";
+import ServiceAPI from "@tsereact/node-rust-windows-native-api/ServiceAPI";
 
-const svc = NodePlugin.setup(import.meta.url);
+import wt from "worker_threads";
 
-const fn = "d:\\test.log";
-writeFileSync(fn, `--- init ${new Date()}\n`);
+NodePlugin.setup(import.meta.url);
 
-let ptr = svc.service_watch(x => {
-    console.log("---", x);
-    appendFileSync(fn, `--- ${x}\n`);
+const service = ServiceAPI.create();
 
-    if (x === "start") {
-        svc.service_start_pending();
-        svc.service_running();
-    }
+if (wt.isMainThread) {
+    start();
+    const worker = new wt.Worker(new URL(import.meta.url));
+} else {
+    service.post("worker-test");
+}
 
-    if (x === "control-stop") {
-        svc.service_clear();
-        svc.service_stop_pending();
-    }
-});
 
-process.on("exit", () => {
-    console.log("--- exit");
-    appendFileSync(fn, `--- exit\n`);
-    svc.service_stopped();
-    svc.service_shutdown();
-});
+function start() {
+    //const fn = "d:\\test.log";
+    //writeFileSync(fn, `--- init ${new Date()}\n`);
 
-process.once("SIGINT", () => {
-    console.log("--- SIGINT");
-    appendFileSync(fn, `--- SIGINT\n`);
-    svc.service_post("control-stop");
-});
+    let ptr = service.watch(x => {
+        console.log("---", x);
+        //appendFileSync(fn, `--- ${x}\n`);
 
-console.log("--- start", svc.service_simulate("test_service", false));
+        if (x === "start") {
+            service.startPending();
+            service.running();
+        }
+
+        if (x === "control-stop") {
+            service.clear();
+            service.stopPending();
+        }
+    });
+
+    process.on("exit", () => {
+        console.log("--- exit");
+        //appendFileSync(fn, `--- exit\n`);
+        service.stopped();
+        service.shutdown();
+    });
+
+    process.once("SIGINT", () => {
+        console.log("--- SIGINT");
+        //appendFileSync(fn, `--- SIGINT\n`);
+        service.post("control-stop");
+    });
+
+    console.log("--- start", service.simulate("test_service", false));
+}

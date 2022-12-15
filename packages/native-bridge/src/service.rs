@@ -246,7 +246,6 @@ fn service_watch(mut cx: FunctionContext) -> JsResult<JsValue> {
             let arg = cx.string(info);
             f.call_with(&mut cx).arg(arg).exec(&mut cx)?;
 
-
             Ok(())
         });
     });
@@ -255,7 +254,8 @@ fn service_watch(mut cx: FunctionContext) -> JsResult<JsValue> {
 }
 
 fn service_clear(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    if cx.len() > 0 {
+    let mut i = 0;
+    if cx.arg_opt(&mut i) {
         cx.dispose::<WatchHandle>(0)?;
     } else {
         callbacks.clear();

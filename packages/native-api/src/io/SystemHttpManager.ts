@@ -6,8 +6,8 @@ import { DuplexPair } from "./DuplexPair";
 import SystemHttpRequest, { RequestData, ResponseData } from "./SystemHttpRequest";
 import SystemHttpSession from "./SystemHttpSession";
 
-import PushAPI from "./PushAPI";
-import UserAPI, { UserGroup } from "./UserAPI";
+import PushAPI from "../PushAPI";
+import UserAPI, { UserGroup } from "../UserAPI";
 
 class OpQueue extends Set<() => boolean | Promise<boolean>> {
     private done: () => boolean;

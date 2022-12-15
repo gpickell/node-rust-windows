@@ -2,7 +2,7 @@ import http, { Agent } from "http";
 
 import NodePlugin from "@tsereact/node-rust-windows-native-api/NodePlugin";
 import Manager from "@tsereact/node-rust-windows-native-api/io/SystemHttpManager";
-import UserAPI from "@tsereact/node-rust-windows-native-api/io/UserAPI";
+import UserAPI from "@tsereact/node-rust-windows-native-api//UserAPI";
 
 NodePlugin.setup(import.meta.url);
 

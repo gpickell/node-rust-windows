@@ -47,6 +47,8 @@ impl<T> Delegate<T> {
 }
 
 pub trait FunctionContextEx<'a> {
+    fn arg_opt(&mut self, i: &mut i32) -> bool;
+
     fn arg_bool(&mut self, i: &mut i32) -> NeonResult<bool>;
     fn arg_buffer(&mut self, i: &mut i32) -> JsResult<'a, JsBuffer>;
     fn arg_string(&mut self, i: &mut i32) -> NeonResult<String>;
@@ -63,6 +65,19 @@ pub trait FunctionContextEx<'a> {
 }
 
 impl<'a> FunctionContextEx<'a> for FunctionContext<'a> {
+    fn arg_opt(&mut self, i: &mut i32) -> bool {
+        if let Some(value) = self.argument_opt(*i) {
+            if value.is_a::<JsUndefined, _>(self) {
+                *i += 1;
+                return false;
+            }
+
+            return true;
+        }
+
+        false
+    }
+
     fn arg_bool(&mut self, i: &mut i32) -> NeonResult<bool> {
         let result = self.argument::<JsBoolean>(*i)?.value(self);
         *i += 1;
@@ -128,7 +143,7 @@ impl<'a> FunctionContextEx<'a> for FunctionContext<'a> {
         let result = self.argument::<JsBox<RefCell<Option<Arc<T>>>>>(*i)?;
         *i += 1;
 
-        if let Some(arc) = result.borrow() {
+        if let Some(arc) = (**result).borrow().as_ref() {
             return Ok(arc.clone());
         }
 

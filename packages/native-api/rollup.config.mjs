@@ -4,12 +4,14 @@ import { defineConfig } from "rollup";
 import typescript from "@rollup/plugin-typescript";
 
 const inputs = [
-    "NodePlugin",
     "io/SystemHttpManager",
     "io/SystemHttpRequest",
     "io/SystemHttpSession",
-    "io/PushAPI",
-    "io/UserAPI",
+    
+    "NodePlugin",
+    "PushAPI",
+    "ServiceAPI",
+    "UserAPI",
 ];
 
 export default defineConfig({

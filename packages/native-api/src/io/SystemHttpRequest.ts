@@ -1,6 +1,6 @@
 import { Headers } from "./Headers";
 import { NodePlugin } from "../NodePlugin";
-import { UserGroup } from "./UserAPI";
+import { UserGroup } from "../UserAPI";
 
 function initMapper() {
     let requestHeaders = Object.assign(Object.create(null) as Record<string, number>, {

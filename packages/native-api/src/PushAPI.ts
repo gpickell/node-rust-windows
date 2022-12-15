@@ -6,7 +6,7 @@
     2. Abstraction layers are viable for building cross-platform solutions.  
 */
 
-import Headers from "./Headers";
+import Headers from "./io/Headers";
 
 const map = new WeakMap<any, () => PushAPI>();
 const patches = new WeakMap<any, (hint: any) => PushAPI>();
