@@ -8,7 +8,8 @@ const inputs = [
     "io/SystemHttpManager",
     "io/SystemHttpRequest",
     "io/SystemHttpSession",
-    "io/UserInfo",
+    "io/PushAPI",
+    "io/UserAPI",
 ];
 
 export default defineConfig({

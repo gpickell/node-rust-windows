@@ -5,7 +5,9 @@ import { DuplexPair } from "./DuplexPair";
 
 import SystemHttpRequest, { RequestData, ResponseData } from "./SystemHttpRequest";
 import SystemHttpSession from "./SystemHttpSession";
-import UserInfo, { UserGroup } from "./UserInfo";
+
+import PushAPI from "./PushAPI";
+import UserAPI, { UserGroup } from "./UserAPI";
 
 class OpQueue extends Set<() => boolean | Promise<boolean>> {
     private done: () => boolean;
@@ -177,7 +179,9 @@ export interface RelayRequestEvent {
     send: ClientRequest;
     state: any;
 
-    resolveIdentity(names?: boolean): UserGroup[];
+    exposeIdentity(names?: boolean): UserGroup[];
+    exposePush(): void;
+
     drop(): void;
 }
 
@@ -225,6 +229,7 @@ class RelayHelper {
     readonly state: any = {};
 
     readonly native: SystemHttpRequest;
+    readonly push: PushAPI;
     readonly request?: ClientRequest;
     readonly response?: IncomingMessage;
     readonly source: DuplexPair;
@@ -232,6 +237,8 @@ class RelayHelper {
 
     constructor(native: SystemHttpRequest) {
         this.native = native;
+        this.push = new PushAPI();
+
         [this.source, this.target] = DuplexPair.create();
     }
 
@@ -257,11 +264,15 @@ class RelayHelper {
                     send: request,
                     state,
 
-                    resolveIdentity: (names?: boolean) => {
+                    exposeIdentity(names?: boolean) {
                         const result = native.resolveIdentity(names);
-                        UserInfo.register(target, result);
+                        UserAPI.register(target, () => Promise.resolve(result));
 
                         return result;
+                    },
+
+                    exposePush()  {
+                        
                     },
 
                     drop: ops.fail
@@ -531,6 +542,8 @@ export class SystemHttpManager extends EventEmitter {
     private session?: SystemHttpSession;
 
     public async process(name: string) {
+        await (0 as any);
+
         const { requests } = this;
         const native = SystemHttpRequest.create(name);
         while (!native.done()) {
