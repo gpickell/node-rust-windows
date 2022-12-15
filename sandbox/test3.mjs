@@ -1,17 +1,21 @@
-import http, { Agent } from "http";
+import http, { Agent, IncomingMessage, ServerResponse } from "http";
 
 import NodePlugin from "@tsereact/node-rust-windows-native-api/NodePlugin";
 import Manager from "@tsereact/node-rust-windows-native-api/io/SystemHttpManager";
-import Session from "@tsereact/node-rust-windows-native-api/io/SystemHttpSession";
+import PushAPI from "@tsereact/node-rust-windows-native-api/io/PushAPI";
 
 NodePlugin.setup(import.meta.url);
 
 setInterval(() => {}, 30000);
 
+PushAPI.patch(ServerResponse.prototype, x => PushAPI.find(x.socket));
+
 const name = "test-v4";
 const manager = new Manager();
 manager.createSession(name);
 manager.process(name);
+
+manager.on("relay-request", x => x.exposePush());
 
 process.on("exit", () => {
     manager.close();
@@ -35,6 +39,9 @@ server.on("request", (req, res) => {
     req.on("data", x => console.log("--- server data", JSON.stringify(x)));
     req.on("end", x => {
         console.log("--- server end");
+
+        const push = PushAPI.find(res);
+        push.get("/static.html", "X-Test", "test-push-1");
 
         res.statusCode = 200;
         res.setHeader("X-WWW-Authenticate", ["Negotiate", "NTLM"])

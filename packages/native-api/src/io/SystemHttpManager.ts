@@ -214,15 +214,17 @@ export interface SystemHttpManager {
     on(event: "relay-upgrade", listener: (data: RelayResponseEvent<IncomingMessage>) => any): this;
     on(event: "relay-continue", listener: (data: RelayResponseEvent<InformationEvent>) => any): this;
     on(event: "relay-response", listener: (data: RelayResponseEvent<IncomingMessage>) => any): this;
+    on(event: "push-error", listener: (err: Error) => any): this;
 
     emit(event: "handoff", socket: Duplex): boolean;
-    emit(event: "relay-error", info: RelayErrorEvent): this;
-    emit(event: "relay-request", info: RelayRequestEvent): this;
-    emit(event: "relay-connect", info: RelayResponseEvent<IncomingMessage>): this;
-    emit(event: "relay-upgrade", info: RelayResponseEvent<IncomingMessage>): this;
-    emit(event: "relay-continue", info: RelayResponseEvent<InformationEvent>): this;
-    emit(event: "relay-response", info: RelayResponseEvent<IncomingMessage>): this;
-    emit(event: "relay-trailers", info: RelayResponseEvent<IncomingMessage>): this;
+    emit(event: "relay-error", info: RelayErrorEvent): boolean;
+    emit(event: "relay-request", info: RelayRequestEvent): boolean;
+    emit(event: "relay-connect", info: RelayResponseEvent<IncomingMessage>): boolean;
+    emit(event: "relay-upgrade", info: RelayResponseEvent<IncomingMessage>): boolean;
+    emit(event: "relay-continue", info: RelayResponseEvent<InformationEvent>): boolean;
+    emit(event: "relay-response", info: RelayResponseEvent<IncomingMessage>): boolean;
+    emit(event: "relay-trailers", info: RelayResponseEvent<IncomingMessage>): boolean;
+    emit(event: "push-error", err: Error): boolean;
 }
 
 class RelayHelper {
@@ -243,7 +245,7 @@ class RelayHelper {
     }
 
     relayRequest(request: ClientRequest, owner: SystemHttpManager) {
-        const { native, source, state, target } = this;
+        const { native, push, source, state, target } = this;
         return new Promise<boolean>(resolve => {
             const ops = new OpQueue(() => native.done(), resolve);
             request.on("connect", () => {
@@ -272,7 +274,7 @@ class RelayHelper {
                     },
 
                     exposePush()  {
-                        
+                        PushAPI.register(target, () => push);
                     },
 
                     drop: ops.fail
@@ -301,7 +303,7 @@ class RelayHelper {
 
     relayResponse(request: ClientRequest, owner: SystemHttpManager) {
         let ignoreClose = false;
-        const { native, source, state } = this;
+        const { native, source, push, state } = this;
         return new Promise<boolean>(resolve => {
             const ops = new OpQueue(() => native.done(), resolve);
             request.on("close", () => {
@@ -448,6 +450,14 @@ class RelayHelper {
                         state,
                         drop: ops.fail
                     });
+
+                    for (const [method, url, headers] of push) {
+                        try {
+                            native.push(method, url, headers);
+                        } catch (ex) {
+                            owner.emit("push-error", ex as any);
+                        }
+                    }
 
                     return false;
                 });

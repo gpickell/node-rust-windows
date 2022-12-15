@@ -128,7 +128,7 @@ impl<'a> FunctionContextEx<'a> for FunctionContext<'a> {
         let result = self.argument::<JsBox<RefCell<Option<Arc<T>>>>>(*i)?;
         *i += 1;
 
-        if let Some(arc) = (**result).borrow().as_ref() {
+        if let Some(arc) = result.borrow() {
             return Ok(arc.clone());
         }
 
