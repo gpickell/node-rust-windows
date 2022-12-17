@@ -2,6 +2,8 @@ import { Headers } from "./Headers";
 import { NodePlugin } from "../NodePlugin";
 import { UserGroup } from "../UserAPI";
 
+import Request, { RequestData, ResponseData } from "./Request";
+
 function initMapper() {
     let requestHeaders = Object.assign(Object.create(null) as Record<string, number>, {
         "Cache-Control": 0,
@@ -176,30 +178,13 @@ function addBlockHeader(array: BlockItem[], name: string, value: string) {
     }
 }
 
-export class RequestData {
-    method = "";
-    url = "";
-    version = "";
-
-    readonly headers = new Headers();
-}
-
-export class ResponseData {
-    status = 0;
-    reason = "";
-    version = "";
-
-    readonly headers = new Headers();
-    readonly trailers = new Headers();
-}
-
 type Data = string | Buffer | (string | Buffer)[];
 
 function toBuffer(data: string | Buffer) {
     return typeof data === "string" ? Buffer.from(data) : data;
 }
 
-export class SystemHttpRequest {
+export class SystemHttpRequest implements Request {
     readonly id: [unknown];
     readonly ref: [unknown];
     readonly name: string;
@@ -247,7 +232,6 @@ export class SystemHttpRequest {
         }
     }
 
-    // @ts-ignore
     push(method: string, url: string, headers: Headers) {
         const path = url.replace(/\?.*/, "");
         const query = url.substring(path.length);
@@ -350,7 +334,6 @@ export class SystemHttpRequest {
         return data.subarray(0, result.size);
     }
 
-    // @ts-ignore
     async send(final = false) {
         if (final) {
             this.writable = false;
