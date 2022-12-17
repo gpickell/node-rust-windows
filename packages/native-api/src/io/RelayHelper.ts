@@ -42,6 +42,22 @@ function wantContinue(native: Request) {
     return false;
 }
 
+export interface RouteRequestEvent {
+    readonly factory?: () => ClientRequest | undefined;
+    
+    initial: RequestData;
+    state: any;
+
+    use(request: () => ClientRequest | undefined): void;
+    drop(): void;
+}
+
+export interface RouteErrorEvent {
+    initial: RequestData;
+    error: Error;
+    state: any;
+}
+
 export interface RelayRequestEvent {
     initial: RequestData;
     send: ClientRequest;
@@ -74,6 +90,26 @@ export interface RelayErrorEvent {
     drop(): void;
 }
 
+export interface PushErrorEvent {
+    initial: RequestData;
+    sent: ClientRequest;
+    reply: IncomingMessage;
+    outgoing: ResponseData;
+    error: any;
+    state: any;
+
+    drop(): void;
+}
+
+export interface SocketHandoffEvent {
+    initial: RequestData;
+    sent: ClientRequest;
+    socket: Duplex;
+    state: any;
+
+    drop(): void;
+}
+
 export interface RelayHelperEvents {
     "relay-error"(info: RelayErrorEvent): any;
     "relay-request"(info: RelayRequestEvent): any;
@@ -82,8 +118,10 @@ export interface RelayHelperEvents {
     "relay-continue"(info: RelayResponseEvent<InformationEvent>): any;
     "relay-response"(info: RelayResponseEvent<IncomingMessage>): any;
     "relay-trailers"(info: RelayResponseEvent<IncomingMessage>): any;
-    "push-error"(err: Error): any;
-    "socket-handoff"(socket: Duplex): any;
+    "push-error"(info: PushErrorEvent): any;
+    "route-request"(info: RouteRequestEvent): any;
+    "route-error"(info: RouteErrorEvent): any;
+    "socket-handoff"(info: SocketHandoffEvent): any;
 }
 
 export interface RelayHelperEmitter {
@@ -108,7 +146,7 @@ class RelayHelper {
     }
 
     relayRequest(request: ClientRequest, owner: RelayHelperEmitter) {
-        const { native, push, state, target } = this;
+        const { native, push, state, source, target } = this;
         return new Promise<boolean>(resolve => {
             const ops = new OpQueue(() => native.done(), resolve);
             request.on("connect", (_, source) => {
@@ -121,6 +159,23 @@ class RelayHelper {
 
             request.on("continue", () => {
                 ops.receive(native, request);                
+            });
+
+            request.on("socket", socket => {
+                if (socket as any === source) {
+                    ops.push(() => {
+                        owner.emit("socket-handoff", {
+                            initial: native.request,
+                            sent: request,
+                            socket: this.target,
+                            state,
+        
+                            drop: ops.fail
+                        });
+
+                        return false;
+                    });
+                }
             });
 
             ops.push(() => {
@@ -144,8 +199,6 @@ class RelayHelper {
                 });
                
                 native.dropIdentity();
-                owner.emit("socket-handoff", target);
-
                 return false;
             });
 
@@ -156,11 +209,12 @@ class RelayHelper {
                 } else {
                     request.removeHeader("Expect");
                     request.end();
-                    ops.good();
+
+                    request.on("finish", () => ops.good());
                 }
 
                 return false;
-            })
+            });
         });
     }
 
@@ -318,7 +372,15 @@ class RelayHelper {
                         try {
                             native.push(method, url, headers);
                         } catch (ex) {
-                            owner.emit("push-error", ex as any);
+                            owner.emit("push-error", {
+                                initial: native.request,
+                                sent: request,
+                                reply: response,
+                                outgoing: native.response,
+                                error: ex as any,
+                                state,
+                                drop: ops.fail
+                            });
                         }
                     }
 
@@ -347,10 +409,62 @@ class RelayHelper {
         return request({ method, headers: Object.fromEntries(headers.render()), path: url, createConnection: () => source as any });
     }
 
-    async relay(client: ClientRequest, owner: RelayHelperEmitter) {
-        const { native } = this;
+    setup(owner: RelayHelperEmitter) {
+        let client: ClientRequest | undefined;
+        const { native, state } = this;
+        try {
+            let drop = false;
+            let factory: (() => ClientRequest | undefined) | undefined;
+                owner.emit("route-request", {
+                initial: native.request,
+                state,
+
+                use(f) {
+                    factory = f;
+                    Object.assign(this, { factory });
+                },
+
+                drop() {
+                    drop = true;
+                }
+            });
+
+            if (drop) {
+                return undefined;
+            }
+
+            if (factory) {
+                client = factory();
+            }
+        } catch (ex) {
+            owner.emit("route-error", {
+                initial: native.request,
+                error: ex as any,
+                state,
+            });
+        }
+
+        if (client === undefined) {
+            const { source } = this;
+            const { method, headers, url } = native.request;
+            client = request({ method, headers: Object.fromEntries(headers.render()), path: url, createConnection: () => source as any });
+        }
+
+        return client
+    }
+
+    async relay(owner: RelayHelperEmitter, client?: ClientRequest) {
+        if (client === undefined) {
+            client = this.setup(owner);
+
+            if (client === undefined) {
+                return this.destroy();
+            }
+        }
+
         Object.assign(this, { request: client });
 
+        const { native } = this;
         const req = this.relayRequest(client, owner);
         const res = this.relayResponse(client, owner);
         const both = new Promise<boolean>(resolve => {

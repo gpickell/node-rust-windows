@@ -224,12 +224,14 @@ export class SystemHttpRequest implements Request {
     }
 
     close() {
+        this.dropIdentity();
+        
         const { ref, id } = this;
         id.shift();
 
         if (ref[0]) {
             svc.http_session_close(ref.pop());
-        }
+        }        
     }
 
     push(method: string, url: string, headers: Headers) {
@@ -258,10 +260,13 @@ export class SystemHttpRequest implements Request {
     }
 
     ok() {
+        this.dropIdentity();
         this.id.pop();
     }
 
     async cancel() {
+        this.dropIdentity();
+
         const { id, ref } = this;
         if (id[0] && ref[0]) {
             return await svc.http_request_cancel(ref[0], id.pop()) as number;

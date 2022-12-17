@@ -34,8 +34,7 @@ export class SystemHttpManager extends EventEmitter {
 
             const result = await next.receive();
             if (result === true) {
-                const client = helper.createDefaultRequest();
-                helper.relay(client, this).finally(() => requests.delete(helper));
+                helper.relay(this).finally(() => requests.delete(helper));
             } else {
                 helper.cancel().finally(() => requests.delete(helper));
             }

@@ -30,7 +30,7 @@ manager.on("relay-request", info => {
 const server = http.createServer();
 server.listen(9580, "localhost");
 
-manager.on("socket-handoff", x => server.emit("connection", x));
+manager.on("socket-handoff", x => server.emit("connection", x.socket));
 
 server.on("request", (req, res) => {
     console.log("--- server request", req.method, req.url, req.httpVersion, req.headers);
