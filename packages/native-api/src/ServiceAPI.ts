@@ -1,5 +1,7 @@
 import NodePlugin from "./NodePlugin";
 
+type Controls = "start" | "stop" | "pause" | "continue";
+
 let svc: any;
 
 export class ServiceAPI {
@@ -37,11 +39,11 @@ export class ServiceAPI {
     }
 
     simulate(name: string, pauseSupport = false) {
-        svc.service_simulate(name, pauseSupport);
+        return svc.service_simulate(name, pauseSupport);
     }
 
     start(name: string, pauseSupport = false) {
-        svc.service_start(name, pauseSupport);
+        return svc.service_start(name, pauseSupport);
     }
 
     shutdown() {
@@ -52,8 +54,15 @@ export class ServiceAPI {
         svc.service_clear(handle);
     }
 
-    watch(callback: (info: string, isStop: boolean) => any): unknown {
-        return svc.service_watch(callback);
+    watch(callback: (info: string, controls: Record<Controls, boolean>) => any): unknown {
+        return svc.service_watch((x: string) => {
+            callback(x, {
+                start: x === "control-register" || x === "control-simulate",
+                stop: x === "control-stop",
+                pause: x === "control-pause",
+                continue: x === "control-continue",
+            });
+        });
     }
 
     post(info: string) {

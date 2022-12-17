@@ -20,8 +20,8 @@ function start() {
     //const fn = "d:\\test.log";
     //writeFileSync(fn, `--- init ${new Date()}\n`);
 
-    let ptr = service.watch(x => {
-        console.log("---", x);
+    let ptr = service.watch((x, ...args) => {
+        console.log("---", x, ...args);
         //appendFileSync(fn, `--- ${x}\n`);
 
         if (x === "start") {

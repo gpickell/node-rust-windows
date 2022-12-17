@@ -10,10 +10,6 @@ crate-type = ["cdylib"]
 url = "2.3.1"
 windows-service = "0.5.0"
 
-[dependencies.futures]
-version = "0.3.25"
-features = ["executor", "thread-pool"]
-
 [dependencies.neon]
 version = "0.10.1"
 default-features = false

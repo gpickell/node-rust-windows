@@ -2,7 +2,15 @@
     "name": "@tsereact/node-rust-windows-native-bridge",
     "version": "1.0.0",
     "type": "module",
+    "files": [
+        "dist"
+    ],
     "scripts": {
         "build": "node build.mjs"
+    },
+    "exports": {
+        "./plugin-arm64": "./dist/plugin-aarch64-pc-windows-msvc.node",
+        "./plugin-ia32": "./dist/plugin-i686-pc-windows-msvc.node",
+        "./plugin-x64": "./dist/plugin-x86_64-pc-windows-msvc.node"
     }
 }

@@ -1,4 +1,5 @@
 import { createRequire } from "module";
+import { arch } from "os";
 import { fileURLToPath } from "url";
 
 let svc: any;
@@ -20,7 +21,7 @@ export namespace NodePlugin {
         }
 
         const r = createRequire(path);
-        hint = hint || process.env[ENV_HINT] || "@tsereact/node-rust-windows-native-bridge/plugin.node";
+        hint = hint || process.env[ENV_HINT] || `@tsereact/node-rust-windows-native-bridge/plugin-${arch()}`;
         hint = r.resolve(hint);
         svc = r(hint);
 

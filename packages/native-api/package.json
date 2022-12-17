@@ -2,6 +2,9 @@
     "name": "@tsereact/node-rust-windows-native-api",
     "version": "1.0.0",
     "type": "module",
+    "files": [
+        "dist/**"
+    ],
     "devDependencies": {
         "@rollup/plugin-typescript": "^10.0.1",
         "@types/jest": "^29.2.4",

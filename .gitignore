@@ -1,6 +1,6 @@
 dist
+package.tgz
 target
-*.node
 .yarn/cache
 .yarn/unplugged
 .yarn/install-state.gz

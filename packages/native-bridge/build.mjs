@@ -1,12 +1,19 @@
 import { spawnSync } from "child_process";
-import { copyFileSync } from "fs";
+import { copyFileSync, mkdirSync } from "fs";
 
-const child = spawnSync("cargo", ["build", "--release"], {
-    stdio: "inherit"    
-});
+function build(target) {
+    const child = spawnSync("cargo", ["build", "--release", "--target", target], {
+        stdio: "inherit"
+    });
 
-process.exitCode = child.status;
-
-if (!process.exitCode) {
-    copyFileSync("target/release/plugin.dll", "plugin.node");
+    if (!child.status) {
+        mkdirSync("dist", { recursive: true });
+        copyFileSync(`target/${target}/release/plugin.dll`, `dist/plugin-${target}.node`);
+    } else {
+        process.exit(child.status);
+    }
 }
+
+build("x86_64-pc-windows-msvc");
+build("i686-pc-windows-msvc");
+build("aarch64-pc-windows-msvc");

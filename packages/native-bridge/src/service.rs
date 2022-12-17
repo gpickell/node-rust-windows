@@ -96,7 +96,7 @@ fn service_main() {
 
         callbacks.send(|| "control-register");
     } else {
-        callbacks.send(|| "control-idle");
+        callbacks.send(|| "control-simulate");
     }
 
     let mut guard = state.lock();
