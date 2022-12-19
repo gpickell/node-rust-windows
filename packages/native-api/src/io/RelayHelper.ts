@@ -52,18 +52,12 @@ export interface RouteRequestEvent {
     drop(): void;
 }
 
-export interface RouteErrorEvent {
-    initial: RequestData;
-    error: Error;
-    state: any;
-}
-
 export interface RelayRequestEvent {
     initial: RequestData;
     send: ClientRequest;
     state: any;
 
-    exposeIdentity(names?: boolean): UserGroup[];
+    exposeIdentity(): UserGroup[];
     exposePush(): void;
 
     drop(): void;
@@ -90,17 +84,6 @@ export interface RelayErrorEvent {
     drop(): void;
 }
 
-export interface PushErrorEvent {
-    initial: RequestData;
-    sent: ClientRequest;
-    reply: IncomingMessage;
-    outgoing: ResponseData;
-    error: any;
-    state: any;
-
-    drop(): void;
-}
-
 export interface SocketHandoffEvent {
     initial: RequestData;
     sent: ClientRequest;
@@ -118,9 +101,7 @@ export interface RelayHelperEvents {
     "relay-continue"(info: RelayResponseEvent<InformationEvent>): any;
     "relay-response"(info: RelayResponseEvent<IncomingMessage>): any;
     "relay-trailers"(info: RelayResponseEvent<IncomingMessage>): any;
-    "push-error"(info: PushErrorEvent): any;
     "route-request"(info: RouteRequestEvent): any;
-    "route-error"(info: RouteErrorEvent): any;
     "socket-handoff"(info: SocketHandoffEvent): any;
 }
 
@@ -184,8 +165,8 @@ class RelayHelper {
                     send: request,
                     state,
 
-                    exposeIdentity(names?: boolean) {
-                        const result = native.resolveIdentity(names);
+                    exposeIdentity() {
+                        const result = native.resolveIdentity();
                         UserAPI.register(target, () => Promise.resolve(result));
 
                         return result;
@@ -369,19 +350,7 @@ class RelayHelper {
                     });
 
                     for (const [method, url, headers] of push) {
-                        try {
-                            native.push(method, url, headers);
-                        } catch (ex) {
-                            owner.emit("push-error", {
-                                initial: native.request,
-                                sent: request,
-                                reply: response,
-                                outgoing: native.response,
-                                error: ex as any,
-                                state,
-                                drop: ops.fail
-                            });
-                        }
+                        native.push(method, url, headers);
                     }
 
                     return false;
@@ -403,45 +372,31 @@ class RelayHelper {
         });
     }
 
-    createDefaultRequest() {
-        const { native, source } = this;
-        const { method, headers, url } = native.request;
-        return request({ method, headers: Object.fromEntries(headers.render()), path: url, createConnection: () => source as any });
-    }
-
     setup(owner: RelayHelperEmitter) {
+        let drop = false;
         let client: ClientRequest | undefined;
         const { native, state } = this;
-        try {
-            let drop = false;
-            let factory: (() => ClientRequest | undefined) | undefined;
-                owner.emit("route-request", {
-                initial: native.request,
-                state,
+        let factory: (() => ClientRequest | undefined) | undefined;
+            owner.emit("route-request", {
+            initial: native.request,
+            state,
 
-                use(f) {
-                    factory = f;
-                    Object.assign(this, { factory });
-                },
+            use(f) {
+                factory = f;
+                Object.assign(this, { factory });
+            },
 
-                drop() {
-                    drop = true;
-                }
-            });
-
-            if (drop) {
-                return undefined;
+            drop() {
+                drop = true;
             }
+        });
 
-            if (factory) {
-                client = factory();
-            }
-        } catch (ex) {
-            owner.emit("route-error", {
-                initial: native.request,
-                error: ex as any,
-                state,
-            });
+        if (drop) {
+            return undefined;
+        }
+
+        if (factory) {
+            client = factory();
         }
 
         if (client === undefined) {
@@ -450,16 +405,12 @@ class RelayHelper {
             client = request({ method, headers: Object.fromEntries(headers.render()), path: url, createConnection: () => source as any });
         }
 
-        return client
+        return client;
     }
 
-    async relay(owner: RelayHelperEmitter, client?: ClientRequest) {
+    async relay(owner: RelayHelperEmitter, client = this.setup(owner)) {
         if (client === undefined) {
-            client = this.setup(owner);
-
-            if (client === undefined) {
-                return this.destroy();
-            }
+            return this.destroy();
         }
 
         Object.assign(this, { request: client });
@@ -510,6 +461,7 @@ class RelayHelper {
 
     teardown() {
         this.request?.removeAllListeners();
+        this.request?.on("error", () => {});
         this.request?.destroy();
         this.response?.removeAllListeners();
         this.response?.destroy();

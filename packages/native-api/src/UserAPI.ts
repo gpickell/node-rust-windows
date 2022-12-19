@@ -9,7 +9,7 @@
 const map = new WeakMap<any, () => Promise<UserAPI>>();
 const patches = new WeakMap<any, (hint: any) => Promise<UserAPI>>();
 
-export type Resolve<T extends boolean> = T extends true ? string : Promise<string>;
+export type Resolve<T extends boolean> = string | (T extends false ? () => Promise<string | undefined> : never);
 export type UserGroup<T extends boolean = boolean> = [type: string, sid: string, name?: Resolve<T>];
 
 export class UserAPI<T extends boolean = boolean> extends Array<UserGroup<T>> {
@@ -35,11 +35,15 @@ export class UserAPI<T extends boolean = boolean> extends Array<UserGroup<T>> {
     }
 
     async resolve() {
+        const promises = [] as any[];
         for (const group of this) {
-            group[2] = await group[2];
+            if (typeof group[2] === "function") {
+                promises.push(group[2]().then(x => group[2] = x));
+            }
         }
         
-        return this as any as Promise<UserAPI<true>>;
+        await Promise.all(promises);
+        return this as any as UserAPI<true>;
     }
 
     static async find(hint: any) {

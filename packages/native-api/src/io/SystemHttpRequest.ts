@@ -275,14 +275,26 @@ export class SystemHttpRequest implements Request {
         return 0;
     }
 
-    resolveIdentity(names = false) {
+    resolveIdentity() {
         const { user } = this;
         this.user = undefined;
 
         if (user) {
-            let result = svc.user_groups("viaToken", names, user) as UserGroup[];
+            console.log("--- here 1");
+            const result = svc.user_groups("viaToken", user) as UserGroup[];
+            for (const row of result) {
+                let promise: Promise<string | undefined> | undefined;
+                row[2] = () => {
+                    if (promise === undefined) {
+                        promise = svc.user_lookup_sid(row[1]) as Promise<string | undefined>;
+                    }
+                    
+                    return promise;
+                };
+            }
+            
             svc.user_close(user);
-
+            console.log("--- here 2");
             return result;
         }
 

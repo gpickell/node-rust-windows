@@ -39,16 +39,6 @@ pub fn find_user_token(req: &HTTP_REQUEST_V2) -> Option<Arc<HandleRef>> {
     None
 }
 
-struct SendRef<T>(T);
-
-unsafe impl<T> Send for SendRef<T> {
-
-}
-
-unsafe impl<T> Sync for SendRef<T> {
-
-}
-
 struct Session {
     queue: HANDLE,
     session: u64,
@@ -138,18 +128,18 @@ impl Session {
             if auth {
                 let ptr = &auth_config as *const HTTP_SERVER_AUTHENTICATION_INFO as *const c_void;
                 let size = size_of::<HTTP_SERVER_AUTHENTICATION_INFO>();
-                let err = HttpSetUrlGroupProperty(self.urls, HttpServerAuthenticationProperty, ptr, size as u32);
+                let err = HttpSetServerSessionProperty(self.session, HttpServerAuthenticationProperty, ptr, size as u32);
                 if err != 0 {
-                    return Err(("HttpSetUrlGroupProperty", err))
+                    return Err(("HttpSetServerSessionProperty", err))
                 }
             }
 
             if auth_ex {
                 let ptr = &auth_config as *const HTTP_SERVER_AUTHENTICATION_INFO as *const c_void;
                 let size = size_of::<HTTP_SERVER_AUTHENTICATION_INFO>();
-                let err = HttpSetUrlGroupProperty(self.urls, HttpServerExtendedAuthenticationProperty, ptr, size as u32);
+                let err = HttpSetServerSessionProperty(self.session, HttpServerExtendedAuthenticationProperty, ptr, size as u32);
                 if err != 0 {
-                    return Err(("HttpSetUrlGroupProperty", err))
+                    return Err(("HttpSetServerSessionProperty", err))
                 }
             }
 

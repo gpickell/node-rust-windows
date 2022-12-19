@@ -41,7 +41,7 @@ export interface Request {
     push(method: string, url: string, headers: Headers): void;
 
     dropIdentity(): void;
-    resolveIdentity(names?: boolean): UserGroup[];
+    resolveIdentity(): UserGroup[];
 }
 
 export default Request;

@@ -21,7 +21,7 @@ export class OpQueue extends Set<() => boolean | Promise<boolean>> {
             }
 
             const promise = new Promise<boolean>(x => x(action()));
-            promise.then(x => x && this.fail(), () => this.fail());
+            promise.then(x => x && this.fail());
         }
 
         this.clear();

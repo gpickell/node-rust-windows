@@ -4,7 +4,6 @@ use super::support::*;
 use super::win32::*;
 
 use std::ffi::*;
-use std::ptr::copy;
 use std::slice::*;
 
 use windows::core::*;
@@ -25,28 +24,6 @@ impl Resolver {
             name: Vec::with_capacity(24),
             domain: Vec::with_capacity(24),
         }
-    }
-
-    unsafe fn append<'a>(mut self, cx: &mut FunctionContext<'a>, list: &Handle<JsArray>, psid: PSID) -> NeonResult<()> {
-        let mut vec = Vec::<u8>::with_capacity(GetLengthSid(psid) as usize);
-        copy(psid.0 as *const u8, vec.as_mut_ptr(), vec.capacity());
-
-        let builder = cx.task(move || {
-            let psid = PSID(vec.as_mut_ptr() as *mut c_void);
-            if let Some(value) = self.resolve(psid) {
-                return value;                
-            }
-    
-            drop(vec);
-            String::from("")
-        });
-
-        let promise = builder.promise(move |mut cx, value| {
-            Ok(cx.string(value))
-        });
-
-        list.set(cx, 2, promise)?;
-        Ok(())
     }
 
     unsafe fn resolve(&mut self, sid: PSID) -> Option<String> {
@@ -114,7 +91,6 @@ fn user_groups(mut cx: FunctionContext) -> JsResult<JsArray> {
         let mut i = 0;
         let mut handle = HANDLE(-1);
         let method = cx.arg_string(&mut i)?;
-        let resolve = cx.arg_bool(&mut i)?;
         if method.eq("viaProcess") {
             let process = GetCurrentProcess();
             let result = OpenProcessToken(process, TOKEN_QUERY, &mut handle);
@@ -168,11 +144,6 @@ fn user_groups(mut cx: FunctionContext) -> JsResult<JsArray> {
                 if list.len(&mut cx) > 0 {
                     js_result.set(&mut cx, i, list)?;
                     i += 1;
-
-                    if resolve {
-                        let resolver = Resolver::new();
-                        resolver.append(&mut cx, &list, user.User.Sid)?;
-                    }
                 }
             }
         }
@@ -192,11 +163,6 @@ fn user_groups(mut cx: FunctionContext) -> JsResult<JsArray> {
                     if list.len(&mut cx) > 0 {
                         js_result.set(&mut cx, i, list)?;
                         i += 1;
-
-                        if resolve {
-                            let resolver = Resolver::new();
-                            resolver.append(&mut cx, &list, group.Sid)?;
-                        }
                     }
                 }
 
@@ -205,11 +171,6 @@ fn user_groups(mut cx: FunctionContext) -> JsResult<JsArray> {
                     if list.len(&mut cx) > 0 {
                         js_result.set(&mut cx, i, list)?;
                         i += 1;
-
-                        if resolve {
-                            let resolver = Resolver::new();
-                            resolver.append(&mut cx, &list, group.Sid)?;
-                        }
                     }
                 }
             }
@@ -224,8 +185,38 @@ fn user_close(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     Ok(cx.undefined())
 }
 
+fn user_lookup_sid(mut cx: FunctionContext) -> JsResult<JsValue> {
+    unsafe {
+        let mut i = 0;
+        let sid = cx.arg_string(&mut i)?;
+        let builder = cx.task(move || {
+            let mut psid = PSID::default();
+            let sid_str = wide(&sid);
+            let converted = ConvertStringSidToSidW(wide_ptr(&sid_str), &mut psid);
+            let mut result = String::from("");
+            if converted.as_bool() {
+                let mut resolver = Resolver::new();
+                if let Some(value) = resolver.resolve(psid) {
+                    result = value;
+                }
+
+                LocalFree(psid.0 as isize);
+            }
+    
+            result
+        });
+
+        let promise = builder.promise(move |mut cx, value| {
+            Ok(cx.string(value))
+        });
+
+        Ok(promise.upcast())
+    }
+}
+
 pub fn user_bind(cx: &mut ModuleContext) -> NeonResult<()> {
     cx.export_function("user_groups", user_groups)?;
+    cx.export_function("user_lookup_sid", user_lookup_sid)?;
     cx.export_function("user_close", user_close)?;
 
     Ok(())

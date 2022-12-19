@@ -104,3 +104,13 @@ impl Drop for HandleRef {
         }
     }
 }
+
+pub struct SendRef<T>(pub T);
+
+unsafe impl<T> Send for SendRef<T> {
+
+}
+
+unsafe impl<T> Sync for SendRef<T> {
+
+}
