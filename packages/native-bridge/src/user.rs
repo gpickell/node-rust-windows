@@ -66,7 +66,7 @@ unsafe fn resize<T>(vec: &mut Vec<T>, size: usize) -> *mut c_void {
     return vec.as_mut_ptr() as *mut c_void;
 }
 
-unsafe fn add_type_sid<'a>(cx: &mut FunctionContext<'a>, name: Handle<'a, JsString>, psid: PSID) -> JsResult<'a, JsArray> {
+unsafe fn add_type_sid<'a, T>(cx: &mut T, name: Handle<'a, JsString>, psid: PSID) -> JsResult<'a, JsArray> where T: Context<'a> {
     let mut value = PSTR::null();
     let list = cx.empty_array();
     let result = ConvertSidToStringSidA(psid, &mut value);
@@ -84,9 +84,72 @@ unsafe fn add_type_sid<'a>(cx: &mut FunctionContext<'a>, name: Handle<'a, JsStri
     return Ok(list)
 }
 
-fn user_groups(mut cx: FunctionContext) -> JsResult<JsArray> {
-    cx.export(());
+pub fn user_groups_internal<'a, T>(cx: &mut T, handle: HANDLE, user_only: bool) -> JsResult<'a, JsValue> where T: Context<'a> {
+    unsafe {
+        let js_result = cx.empty_array();
+        let js_user = cx.string("user");
+        let mut i = 0;
+        let mut size = 0;
+        let mut buf = Vec::<u8>::new();
+        let mut ptr = resize(&mut buf, size as usize);
+        let mut result = GetTokenInformation(handle, TokenUser, Some(ptr), buf.capacity() as u32, &mut size);
+        if !result.as_bool() && GetLastError() == ERROR_INSUFFICIENT_BUFFER {
+            ptr = resize(&mut buf, size as usize);
+            result = GetTokenInformation(handle, TokenUser, Some(ptr), buf.capacity() as u32, &mut size);            
+        }
 
+        if result.as_bool() {
+            let user = &*(ptr as *const TOKEN_USER);
+            let list = add_type_sid(cx, js_user, user.User.Sid)?;
+            if list.len(cx) > 0 {
+                js_result.set(cx, i, list)?;
+                i += 1;
+
+                if user_only {
+                    return list.get(cx, 1);
+                }
+            }
+        }
+
+        if user_only {
+            return Ok(cx.undefined().upcast());
+        }
+
+        let js_group = cx.string("group");
+        let js_deny_only = cx.string("deny-only-group");
+        let mut result = GetTokenInformation(handle, TokenGroups, Some(ptr), buf.capacity() as u32, &mut size);
+        if !result.as_bool() && GetLastError() == ERROR_INSUFFICIENT_BUFFER {
+            ptr = resize(&mut buf, size as usize);
+            result = GetTokenInformation(handle, TokenGroups, Some(ptr), buf.capacity() as u32, &mut size);            
+        }
+
+        if result.as_bool() {
+            let groups = &*(ptr as *const TOKEN_GROUPS);
+            let slice = from_raw_parts(groups.Groups.as_ptr(), groups.GroupCount as usize);
+            for group in slice {
+                if group.Attributes & 4 != 0 {
+                    let list = add_type_sid(cx, js_group, group.Sid)?;
+                    if list.len(cx) > 0 {
+                        js_result.set(cx, i, list)?;
+                        i += 1;
+                    }
+                }
+
+                if group.Attributes & 16 != 0 {
+                    let list = add_type_sid(cx, js_deny_only, group.Sid)?;
+                    if list.len(cx) > 0 {
+                        js_result.set(cx, i, list)?;
+                        i += 1;
+                    }
+                }
+            }
+        }
+
+        Ok(js_result.upcast())
+    }
+}
+
+fn user_groups(mut cx: FunctionContext) -> JsResult<JsValue> {
     unsafe {
         let mut i = 0;
         let mut handle = HANDLE(-1);
@@ -120,63 +183,7 @@ fn user_groups(mut cx: FunctionContext) -> JsResult<JsArray> {
             handle = (*arc).0;
         }
 
-        let js_result = cx.empty_array();
-        let js_user = cx.string("user");
-        let js_group = cx.string("group");
-        let js_deny_only = cx.string("deny-only-group");
-
-        let mut i = 0;
-        let mut size = 0;
-        let mut buf = Vec::<u8>::new();
-        let mut ptr = resize(&mut buf, size as usize);
-        let mut result = GetTokenInformation(handle, TokenUser, Some(ptr), buf.capacity() as u32, &mut size);
-        if !result.as_bool() && GetLastError() == ERROR_INSUFFICIENT_BUFFER {
-            ptr = resize(&mut buf, size as usize);
-            result = GetTokenInformation(handle, TokenUser, Some(ptr), buf.capacity() as u32, &mut size);            
-        }
-
-        if result.as_bool() {
-            let user = &*(ptr as *const TOKEN_USER);
-            let mut value = PSTR::null();
-            let result = ConvertSidToStringSidA(user.User.Sid, &mut value);
-            if result.as_bool() {
-                let list = add_type_sid(&mut cx, js_user, user.User.Sid)?;
-                if list.len(&mut cx) > 0 {
-                    js_result.set(&mut cx, i, list)?;
-                    i += 1;
-                }
-            }
-        }
-
-        let mut result = GetTokenInformation(handle, TokenGroups, Some(ptr), buf.capacity() as u32, &mut size);
-        if !result.as_bool() && GetLastError() == ERROR_INSUFFICIENT_BUFFER {
-            ptr = resize(&mut buf, size as usize);
-            result = GetTokenInformation(handle, TokenGroups, Some(ptr), buf.capacity() as u32, &mut size);            
-        }
-
-        if result.as_bool() {
-            let groups = &*(ptr as *const TOKEN_GROUPS);
-            let slice = from_raw_parts(groups.Groups.as_ptr(), groups.GroupCount as usize);
-            for group in slice {
-                if group.Attributes & 4 != 0 {
-                    let list = add_type_sid(&mut cx, js_group, group.Sid)?;
-                    if list.len(&mut cx) > 0 {
-                        js_result.set(&mut cx, i, list)?;
-                        i += 1;
-                    }
-                }
-
-                if group.Attributes & 16 != 0 {
-                    let list = add_type_sid(&mut cx, js_deny_only, group.Sid)?;
-                    if list.len(&mut cx) > 0 {
-                        js_result.set(&mut cx, i, list)?;
-                        i += 1;
-                    }
-                }
-            }
-        }
-
-        Ok(js_result)
+        user_groups_internal(&mut cx, handle, false)
     }
 }
 

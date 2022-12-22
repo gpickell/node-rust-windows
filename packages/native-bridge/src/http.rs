@@ -1,4 +1,5 @@
 use super::support::*;
+use crate::user::user_groups_internal;
 use super::win32::*;
 
 use neon::prelude::*;
@@ -12,6 +13,7 @@ use windows::core::PCWSTR;
 
 use windows::Win32::Foundation::*;
 use windows::Win32::Networking::HttpServer::*;
+use windows::Win32::Security::Authentication::Identity::*;
 
 use std::ffi::*;
 use std::mem::size_of;
@@ -25,12 +27,14 @@ static ver_init: HTTPAPI_VERSION = HTTPAPI_VERSION {
     HttpApiMinorVersion: 0,
 };
 
-pub fn find_user_token(req: &HTTP_REQUEST_V2) -> Option<Arc<HandleRef>> {
+fn find_user_token(req: &HTTP_REQUEST_V2) -> Option<Arc<HandleRef>> {
     unsafe {
         let slice = from_raw_parts(req.pRequestInfo, req.RequestInfoCount  as usize);    
         for info in slice {
             if info.InfoType == HttpRequestInfoTypeAuth {
                 let auth = &*(info.pInfo as *const HTTP_REQUEST_AUTH_INFO);
+                FreeContextBuffer(auth.PackedContext).ok();
+                
                 return Some(HandleRef::new(auth.AccessToken));
             }
         }
@@ -466,8 +470,10 @@ fn http_request_receive(mut cx: FunctionContext) -> JsResult<JsPromise> {
             }
 
             if let Some(user) = user_opt {
+                let js_user_sid = user_groups_internal(&mut cx, user.0, true)?;
                 let js_user = cx.boxed(RefCell::new(Some(user)));
                 obj.set(&mut cx, "user", js_user)?;
+                obj.set(&mut cx, "user_sid", js_user_sid)?;
             }
 
             drop(vec);

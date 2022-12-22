@@ -6,6 +6,9 @@ export class RequestData {
     url = "";
     version = "";
 
+    speedy = false;
+    userId = "";
+
     readonly headers = new Headers();
 }
 

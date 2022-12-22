@@ -198,7 +198,6 @@ export class SystemHttpRequest implements Request {
     chunked = false;
     disconnect = false;
     opaque = false;
-    speedy = false;
     user: unknown;
 
     constructor(ref: [unknown], name: string) {
@@ -322,8 +321,9 @@ export class SystemHttpRequest implements Request {
         request.method = rest.customVerb || mapper.verb(rest.verb) || "";
         request.url = rest.url || "";
         request.version = rest.version;
+        request.speedy = !!rest.http2;
+        request.userId = rest.user_sid || "";
         response.version = rest.version;
-        this.speedy = !!rest.http2;
 
         for (const [i, value] of knownHeaders.entries()) {
             value && request.headers.add(mapper.request(i), value);

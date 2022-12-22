@@ -446,6 +446,7 @@ class RelayHelper {
 
     cleanup() {
         this.request?.removeAllListeners();
+        this.request?.on("error", () => {});
         this.response?.removeAllListeners();
         this.source?.removeAllListeners();
         this.source?.destroy();

@@ -24,7 +24,7 @@ console.log("--- listen", manager.listen("http://localhost:9480/"));
 console.log("=== listen http://localhost:9480/");
 
 manager.on("relay-request", info => {
-    console.log("--- relay-request", !!info.exposeIdentity(true).length);
+    console.log("--- relay-request", info.initial.userId, !!info.exposeIdentity(true).length);
 });
 
 const server = http.createServer();
