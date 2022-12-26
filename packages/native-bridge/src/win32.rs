@@ -83,7 +83,7 @@ impl HandleRef {
     }
 
     pub fn cleanup(self: &Arc<Self>, ptr: *mut OVERLAPPED, err: u32) {
-        if err != 0 && err != ERROR_IO_PENDING.0 {
+        if err != 0 && err != ERROR_MORE_DATA.0 && err != ERROR_IO_PENDING.0 {
             call_async(ptr, err);
         }
 
