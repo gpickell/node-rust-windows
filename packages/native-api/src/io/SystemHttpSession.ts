@@ -41,6 +41,10 @@ export class SystemHttpSession {
     listen(url: string) {
         svc.http_session_listen(this.handle(), url);
     }
+
+    release(url: string) {
+        svc.http_session_release(this.handle(), url);
+    }
 }
 
 export default SystemHttpSession;

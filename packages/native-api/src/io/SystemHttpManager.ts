@@ -64,6 +64,15 @@ export class SystemHttpManager extends EventEmitter {
         return true;
     }
 
+    release(urlPrefix: string) {
+        if (this.session === undefined) {
+            return false;
+        }
+
+        this.session.release(urlPrefix);
+        return true;
+    }
+
     destroy() {
         this.sessions.forEach(x => x.close());
         this.sessions.clear();

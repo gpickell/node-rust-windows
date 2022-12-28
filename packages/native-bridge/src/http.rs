@@ -4,6 +4,10 @@ use super::win32::*;
 
 use neon::prelude::*;
 use neon::types::buffer::*;
+use windows::Win32::Networking::WinSock::AF_INET;
+use windows::Win32::Networking::WinSock::AF_INET6;
+use windows::Win32::Networking::WinSock::SOCKADDR_IN;
+use windows::Win32::Networking::WinSock::SOCKADDR_IN6;
 
 use core::ptr::*;
 use std::cell::RefCell;
@@ -155,6 +159,25 @@ impl Session {
         unsafe {
             let url_wide = wide(url);
             let err = HttpAddUrlToUrlGroup(self.urls, wide_ptr(&url_wide), 0, 0);
+            if err != 0 {
+                return Err(("HttpAddUrlToUrlGroup", err));
+            }
+    
+            Ok(())
+        }
+    }
+    
+    pub fn release(self: &Arc<Self>, url: &str) -> Result<(), (&str, u32)> {
+        unsafe {
+            let url_wide = wide(url);
+            let mut url_wide_ptr = wide_ptr(&url_wide);
+            let mut flags = 0;
+            if url == "all" {
+                url_wide_ptr = PCWSTR::null();
+                flags = HTTP_URL_FLAG_REMOVE_ALL;
+            }
+            
+            let err = HttpRemoveUrlFromUrlGroup(self.urls, url_wide_ptr, flags);
             if err != 0 {
                 return Err(("HttpAddUrlToUrlGroup", err));
             }
@@ -348,6 +371,16 @@ fn http_session_listen(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     } 
 }
 
+fn http_session_release(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+    let mut i = 0;
+    let arc = cx.import::<Session>(&mut i)?;
+    let url = cx.arg_string(&mut i)?;
+    match arc.release(&url) {
+        Ok(()) => Ok(cx.undefined()),
+        Err((hint, err)) => cx.throw_type_error(format!("{}: {}", hint, err))
+    } 
+}
+
 fn http_session_close(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     cx.dispose::<Session>(0)?;
     Ok(cx.undefined())
@@ -466,6 +499,22 @@ fn http_request_receive(mut cx: FunctionContext) -> JsResult<JsPromise> {
                             }
                         }
                     }
+                }
+
+                let addr = &*info.Address.pLocalAddress;
+                let addr_ptr = info.Address.pLocalAddress as *const u8;
+                if addr.sa_family == AF_INET.0 as u16 {
+                    let size = size_of::<SOCKADDR_IN>();
+                    let mut js_addr = cx.buffer(size)?;
+                    copy(addr_ptr, js_addr.as_mut_slice(&mut cx).as_mut_ptr(), size);
+                    obj.set(&mut cx, "sockaddr", js_addr)?;
+                }
+
+                if addr.sa_family == AF_INET6.0 as u16 {
+                    let size = size_of::<SOCKADDR_IN6>();
+                    let mut js_addr = cx.buffer(size)?;
+                    copy(addr_ptr, js_addr.as_mut_slice(&mut cx).as_mut_ptr(), size);
+                    obj.set(&mut cx, "sockaddr", js_addr)?;
                 }
             }
 
@@ -839,6 +888,7 @@ pub fn http_bind(cx: &mut ModuleContext) -> NeonResult<()> {
     cx.export_function("http_session_create", http_session_create)?;
     cx.export_function("http_session_config", http_session_config)?;
     cx.export_function("http_session_listen", http_session_listen)?;
+    cx.export_function("http_session_release", http_session_release)?;
     cx.export_function("http_session_close", http_session_close)?;
 
     cx.export_function("http_request_create", http_request_create)?;

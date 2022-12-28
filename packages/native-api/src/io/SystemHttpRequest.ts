@@ -1,6 +1,7 @@
 import { Headers } from "./Headers";
 import { NodePlugin } from "../NodePlugin";
 import { UserGroup } from "../UserAPI";
+import { endianness } from "os";
 
 import Request, { RequestData, ResponseData } from "./Request";
 
@@ -310,7 +311,7 @@ export class SystemHttpRequest implements Request {
     }
 
     async receive(size = 0) {
-        const { knownHeaders, unknownHeaders, id, user, ...rest } = await svc.http_request_receive(this.handle(), size);
+        const { knownHeaders, unknownHeaders, id, user, sockaddr, ...rest } = await svc.http_request_receive(this.handle(), size);
         if (rest.code !== 0) {
             return rest.code as number;
         }
@@ -324,6 +325,43 @@ export class SystemHttpRequest implements Request {
         request.speedy = !!rest.http2;
         request.userId = rest.user_sid || "";
         response.version = rest.version;
+
+        if (Buffer.isBuffer(sockaddr)) {
+            let type = 0;
+            const addr: any[] = [];
+            if (endianness() === "BE") {
+                type = sockaddr.readUInt16BE(0);
+            } else {
+                type = sockaddr.readUInt16LE(0);
+            }
+
+            if (type === 23) {
+                addr.push("[");
+
+                let even = true;
+                for (const x of sockaddr.subarray(8, 24)) {
+                    addr.push(x.toString(16).padStart(2, "0"));
+                    even = !even;
+
+                    if (even) {
+                        addr.push(":");
+                    }
+                }
+
+                addr.pop();
+                addr.push("]");
+            } else {
+                for (const x of sockaddr.subarray(4, 8)) {
+                    addr.push(x);
+                    addr.push(".");
+                }
+
+                addr.pop();
+            }
+
+            addr.push(":");
+            addr.push(sockaddr.readUInt16BE(2));
+        }
 
         for (const [i, value] of knownHeaders.entries()) {
             value && request.headers.add(mapper.request(i), value);

@@ -6,6 +6,7 @@ export class RequestData {
     url = "";
     version = "";
 
+    ip = "";
     speedy = false;
     userId = "";
 

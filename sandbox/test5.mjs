@@ -2,7 +2,7 @@ import http, { Agent } from "http";
 
 import NodePlugin from "@tsereact/node-rust-windows-native-api/NodePlugin";
 import Manager from "@tsereact/node-rust-windows-native-api/io/SystemHttpManager";
-import UserAPI from "@tsereact/node-rust-windows-native-api//UserAPI";
+import UserAPI from "@tsereact/node-rust-windows-native-api/UserAPI";
 
 NodePlugin.setup(import.meta.url);
 
@@ -20,8 +20,9 @@ process.on("exit", () => {
     manager.close();
 });
 
-console.log("--- listen", manager.listen("http://localhost:9480/"));
+console.log("--- listen", manager.listen("http://*:9480/"));
 console.log("=== listen http://localhost:9480/");
+console.log("=== listen http://localhost-in:9480/");
 
 manager.on("relay-request", info => {
     console.log("--- relay-request", info.initial.userId, !!info.exposeIdentity(true).length);
