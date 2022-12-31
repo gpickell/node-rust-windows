@@ -280,7 +280,6 @@ export class SystemHttpRequest implements Request {
         this.user = undefined;
 
         if (user) {
-            console.log("--- here 1");
             const result = svc.user_groups("viaToken", user) as UserGroup[];
             for (const row of result) {
                 let promise: Promise<string | undefined> | undefined;
@@ -294,7 +293,6 @@ export class SystemHttpRequest implements Request {
             }
             
             svc.user_close(user);
-            console.log("--- here 2");
             return result;
         }
 
