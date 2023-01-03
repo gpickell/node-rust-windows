@@ -48,7 +48,7 @@ export interface RouteRequestEvent {
     initial: RequestData;
     state: any;
 
-    use(request: () => ClientRequest | undefined): void;
+    use(factory: () => ClientRequest | undefined): void;
     drop(): void;
 }
 
@@ -377,7 +377,11 @@ class RelayHelper {
         let client: ClientRequest | undefined;
         const { native, state } = this;
         let factory: (() => ClientRequest | undefined) | undefined;
-            owner.emit("route-request", {
+        owner.emit("route-request", {
+            get factory() {
+                return factory;
+            },
+
             initial: native.request,
             state,
 

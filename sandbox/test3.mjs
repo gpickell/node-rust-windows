@@ -21,7 +21,7 @@ process.on("exit", () => {
     manager.close();
 });
 
-console.log("--- listen", manager.listen("http://localhost:9480/"));
+console.log("--- listen", manager.listen("http://*:9480/"));
 
 const pin = new Set();
 pin.add(manager);
